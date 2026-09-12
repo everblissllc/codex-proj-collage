@@ -5,11 +5,12 @@
   "scripts": {
     "test": "node scripts/run-tests.mjs",
     "test:vitest": "vitest run",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "check": "npm run typecheck && npm test && wrangler deploy --dry-run"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "*",
+    "@types/node": "^24.13.4",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4",
     "wrangler": "^4.45.0"
