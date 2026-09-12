@@ -1,0 +1,99 @@
+# Affiliate deal card Telegram Worker
+
+One Telegram product link produces a Walmart deal-card PNG and a separate Facebook post. Other store identifiers are recognized for routing, but their extractors and templates are intentionally unimplemented.
+
+## Flow
+
+`POST /telegram/webhook` validates Telegram's secret header and enqueues one job. The Queue consumer resolves up to five HTTP redirects, validates every destination, extracts the Walmart page once, asks the configured copy provider for structured text, fetches the product image, renders controlled HTML through the Browser Run binding, and sends a photo followed by plain Facebook text. `GET /health` is a simple health response.
+
+The original user URL remains `inputUrl` and becomes `postUrl`; `resolvedUrl` is used for store detection and extraction; `canonicalProductUrl` is optional metadata. The AI never receives the affiliate URL. Telegram URL entities are used to preserve the exact link text when available; a text parser is the fallback. The post URL is appended by code, never rewritten by AI.
+
+Walmart extraction tries JSON-LD `Product` and `Offer` first, then embedded `__NEXT_DATA__` product state, then OpenGraph and product-price meta tags. The current price must parse as a positive USD amount. Old price is shown only for explicit `wasPrice`, `listPrice`, or `product:original_price:amount` metadata when greater than the current price. A JSON-LD `highPrice` is never treated as an old price. The product image is fetched separately with a size and MIME limit, then embedded as a data URL so Browser Run does not load any outside resource while making the card.
+
+URL validation allows only HTTP(S) public-looking hostnames and rejects URL credentials, all IP literals, local and internal hostnames, and unsafe redirect destinations. Before each product or image request, a fail-closed Cloudflare DNS-over-HTTPS check rejects DNS answers in private or reserved ranges. Cloudflare's outbound fetch restrictions are an additional safeguard. This is not an unrestricted proxy. Dynamic JavaScript redirects and Walmart anti-bot pages may still prevent extraction. No live Walmart page or Browser Run screenshot has been tested in this repository.
+
+## Configuration
+
+`wrangler.jsonc` declares `BROWSER`, the `PRODUCT_JOBS` Queue binding, the Workers AI binding `AI`, `AI_TEXT_MODEL` (default `@cf/meta/llama-3.2-3b-instruct`), `AFFILIATE_DISCLOSURE` (default `#Ad`), and structured Workers logs. `WorkersAICopyProvider` implements the existing `CopyProvider` interface. It makes one Workers AI inference for `shortTitle` and `facebookBody`, validates JSON and source prices, and appends the affiliate URL itself. Cloudflare's [JSON Mode support list](https://developers.cloudflare.com/workers-ai/features/json-mode/) does not include this 3B model, so the provider requests JSON in its prompt and validates the returned response. No KV, D1, or R2 storage is used.
+
+Required secrets, never committed: `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`. Workers AI uses the `AI` binding and requires no separate AI API key. The Telegram webhook secret must use Telegram's permitted `A-Z`, `a-z`, `0-9`, `_`, `-` characters. For local development, copy `.dev.vars.example` to `.dev.vars` and replace placeholders. Browser Run local execution requires a remote binding; see [Cloudflare's Browser Run local development guidance](https://developers.cloudflare.com/browser-run/reference/wrangler/).
+
+Cloudflare's [current Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/) lists 10,000 Neurons per day included on both Free and Paid plans; usage above that allocation requires Workers Paid and is billed at $0.011 per 1,000 Neurons. The selected 3B model is listed at $0.051 per million input tokens and $0.335 per million output tokens. Workers AI inference uses the Cloudflare account even during local development, so usage can count against the allocation.
+
+Queue jobs are processed one at a time per batch. User-facing failures are acknowledged after a Telegram error message. Queue delivery is at least once, so a rare retry after partial Telegram delivery can duplicate a post; no deduplication store is present in this first version.
+
+## Verification
+
+`npm run typecheck` checks all TypeScript source and tests. `npm test` compiles Worker modules to an isolated temporary folder and runs Node's built-in test runner without esbuild. `npm run test:vitest` is an additional suite and `npm run check` also performs a Wrangler dry run on a supported machine. This macOS 11 host cannot execute the installed esbuild binary, so Vitest, Wrangler type generation, Wrangler dry run, local Worker execution, and live Browser Run verification must be run on a supported machine before production use.
+
+## Temporary hosted smoke test (manual dispatch only)
+
+The [smoke workflow](.github/workflows/smoke-deploy.yml) uses GitHub's `ubuntu-24.04` runner with Node 24. It runs `npm ci`, smoke/production name checks, TypeScript, the Node test suite and TypeScript Vitest suite, and a Wrangler dry run before creating the smoke Queue and deploying the smoke Worker. It runs only on `workflow_dispatch` from the repository's default branch, with the `smoke` GitHub Environment and one concurrent run. It never reads `wrangler.jsonc` for deployment. The project must first be committed to a GitHub repository with these files at its root.
+
+This project directory currently inherits a broader Git repository rooted at `/Users/shop`; it has no `.git` directory of its own. To make this directory a clean standalone repository without changing `/Users/shop/.git`, create an **empty** GitHub repository named `codex-proj-collage` first (do not initialize it with a README, license, or `.gitignore`), then run these commands inside this project. Confirm that `git rev-parse` prints `/Users/shop/Documents/codex-proj-collage` and review the staged filenames before committing. `.dev.vars`, `node_modules`, and `.wrangler` are ignored.
+
+```sh
+cd /Users/shop/Documents/codex-proj-collage
+git init -b main
+git rev-parse --show-toplevel
+git add --all
+git diff --cached --name-only
+git commit -m "Prepare standalone deal-card Worker and smoke workflow"
+git remote add origin "https://github.com/YOUR_GITHUB_USERNAME/codex-proj-collage.git"
+git push -u origin main
+```
+
+`wrangler.smoke.jsonc` deploys only `affiliate-deal-card-smoke` on `workers.dev`, with `affiliate-deal-card-smoke-jobs`, `AI`, `BROWSER`, and `AI_TEXT_MODEL=@cf/meta/llama-3.2-3b-instruct`. It has no production Queue, route, or custom domain. The Queue creation step checks for the exact smoke Queue name and creates it only when absent. Smoke and production Workers use the same source code but separate Worker bindings and Telegram secrets. No Cloudflare resources have been created by this repository preparation.
+
+Create a GitHub Environment named `smoke`, restrict it to the default branch, and optionally require a reviewer. Put **four** secrets in that environment: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `TEST_TELEGRAM_BOT_TOKEN`, and `TEST_TELEGRAM_WEBHOOK_SECRET`. The Telegram values must belong to a separate test bot. GitHub's [current environment availability rules](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments) require GitHub Pro, Team, or Enterprise for environment secrets in private repositories; on GitHub Free, a public repository is needed for this exact workflow. Keep all secret values out of Git.
+
+Scope the Cloudflare token to the one Cloudflare account, with Account `Workers Scripts: Edit` and Account `Queues: Edit`. These cover script upload and Queue create/list/consumer configuration. Workers AI and Browser Run bindings do not require separate API keys or additional REST API token permissions when called from the deployed Worker; the account must have those services available. No Zone or Workers Routes permission is needed because the smoke Worker uses `workers.dev` only. The token can still modify other Workers in the same account, so keep the `smoke` Environment restricted and revoke the token after cleanup. Cloudflare documents [Workers GitHub Actions authentication](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/), [script upload permission](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/content/methods/update/), [Queue creation](https://developers.cloudflare.com/api/resources/queues/methods/create/), and [binding-only Browser Run access](https://developers.cloudflare.com/browser-run/quick-actions/).
+
+After the smoke Worker deploys, the workflow pipes the two test Telegram values from its GitHub Environment directly into `wrangler secret bulk --config wrangler.smoke.jsonc --name affiliate-deal-card-smoke`. Wrangler stores them on the smoke Worker as `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`; it then verifies that both binding names exist. The values are never written to source, Wrangler config, a file, or workflow logs. The workflow rejects an empty test bot token or a webhook secret outside Telegram's allowed 1–256 character `A-Z`, `a-z`, `0-9`, `_`, `-` range. Cloudflare [states that ordinary Wrangler deploys preserve existing Worker secrets](https://developers.cloudflare.com/workers/wrangler/commands/workers/); this workflow also reapplies both on every successful smoke deployment. No manual Cloudflare Dashboard secret entry is needed.
+
+From a shell with only the **test** bot token and secret in `TEST_BOT_TOKEN` and `TEST_WEBHOOK_SECRET`, register its webhook after replacing the smoke URL with the actual URL printed by Wrangler. Do not run this with production bot credentials:
+
+```sh
+curl --fail-with-body --request POST "https://api.telegram.org/bot${TEST_BOT_TOKEN}/setWebhook" \
+  --data-urlencode "url=https://affiliate-deal-card-smoke.<YOUR_SUBDOMAIN>.workers.dev/telegram/webhook" \
+  --data-urlencode "secret_token=${TEST_WEBHOOK_SECRET}" \
+  --data-urlencode 'allowed_updates=["message"]'
+```
+
+Check that Telegram returns `"ok":true`, then use `getWebhookInfo` for the **test** bot to confirm the smoke URL. The public `GET /health` should return `{"ok":true}`. `/start` currently receives the existing “Please send a valid product link.” response; this confirms basic webhook delivery but is not a special command. Send exactly one real Walmart affiliate URL to the **test** bot. The bot should send a progress message, a PNG card, and a separate `✅ Facebook post:` message with the exact original affiliate URL. Manually compare the card's title, product image, current price, and any genuinely available old price against the Walmart page at test time. An absent old price should simply be omitted.
+
+Cloudflare Worker logs should show one correlated `requestId` across `webhook_accepted`, `queue_job_started`, `redirect_resolved`, `store_detected`, `extraction_complete`, `ai_complete`, `product_image_downloaded`, `render_complete`, `process_complete`, `telegram_photo_sent`, and `telegram_copy_sent`. `redirect_resolved` logs the destination hostname; `store_detected` must report `walmart`. `render_complete` must report `image/png`. Failure logs include `errorCode` and durations where available. Logs intentionally omit the full affiliate URL, credentials, raw product data, and AI text. `process_complete` means card generation finished; the two Telegram events prove delivery separately.
+
+The smoke test passes only when the workflow is green, the hosted Queue runs, the real affiliate URL resolves to Walmart, extraction and Workers AI produce valid data, Browser Run returns PNG, both Telegram messages arrive, and the displayed prices and exact affiliate URL match the live Walmart page and input. Walmart anti-bot responses, redirect services that require JavaScript, or model output that fails strict JSON validation remain possible live failures; report the `requestId` and `errorCode` before changing the extractor or provider.
+
+Cleanup is manual: with the **test** bot token, call `deleteWebhook`; then in the Cloudflare Dashboard delete only the Worker named `affiliate-deal-card-smoke` and Queue named `affiliate-deal-card-smoke-jobs`, verifying each name before deletion. The smoke Worker secrets disappear with that Worker. Remove all four secrets from the GitHub `smoke` Environment and revoke the dedicated Cloudflare token when finished. Do not delete the production Worker or Queue.
+
+```sh
+curl --fail-with-body --request POST "https://api.telegram.org/bot${TEST_BOT_TOKEN}/deleteWebhook" \
+  --data-urlencode 'drop_pending_updates=true'
+```
+
+## Eventual setup and deployment (not performed)
+
+From a supported development environment with Cloudflare and Telegram credentials configured:
+
+```sh
+npm ci
+npm run typecheck
+npm test
+npm run test:vitest
+npx wrangler types
+npx wrangler deploy --dry-run
+npx wrangler queues create affiliate-deal-card-jobs
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
+npx wrangler deploy
+```
+
+Then set the Telegram webhook using the deployed Worker URL (the token and webhook secret are local shell variables in this example):
+
+```sh
+curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+  --data-urlencode "url=https://YOUR_WORKER_URL/telegram/webhook" \
+  --data-urlencode "secret_token=${TELEGRAM_WEBHOOK_SECRET}"
+```
