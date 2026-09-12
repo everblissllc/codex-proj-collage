@@ -15,7 +15,7 @@ export type GeneratedContent = { shortTitle: string; facebookPost: string };
 export type CopyDraft = { shortTitle: string; facebookBody: string };
 
 export class ProductError extends Error {
-  constructor(public readonly code: string, public readonly stage: string, message: string) {
+  constructor(public readonly code: string, public readonly stage: string, message: string, public readonly validationReason?: string) {
     super(message);
     this.name = "ProductError";
   }

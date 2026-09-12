@@ -106,8 +106,88 @@ test("exact affiliate URL is appended outside AI", async () => {
 });
 test("AI body cannot change or omit authoritative prices", async () => {
   const p = extractWalmartProduct(withWas, input, walmart);
-  await assert.rejects(generateProductCopy(p, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set", facebookBody: "Disney Toniebox Starter Set is now $49.00, was $99.00." }) }), { code: "AI_INVALID_CONTENT" });
-  await assert.rejects(generateProductCopy(p, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set", facebookBody: "Disney Toniebox Starter Set is now $59.00." }) }), { code: "AI_INVALID_CONTENT" });
+  await assert.rejects(generateProductCopy(p, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set", facebookBody: "Disney Toniebox Starter Set is now $49.00, was $99.00." }) }), { code: "AI_INVALID_CONTENT", validationReason: "AI_CURRENT_PRICE_MISMATCH" });
+  await assert.rejects(generateProductCopy(p, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set", facebookBody: "Disney Toniebox Starter Set is now $59.00." }) }), { code: "AI_INVALID_CONTENT", validationReason: "AI_OLD_PRICE_MISSING" });
+  await assert.rejects(generateProductCopy(p, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set", facebookBody: "Disney Toniebox Starter Set is now $59.00, was $98.00." }) }), { code: "AI_INVALID_CONTENT", validationReason: "AI_OLD_PRICE_MISMATCH" });
+  await assert.rejects(generateProductCopy(p, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set", facebookBody: "Disney Toniebox Starter Set is now $59.00, was $99.00. Save another $5.00." }) }), { code: "AI_INVALID_CONTENT", validationReason: "AI_UNEXPECTED_PRICE" });
+});
+const validAiDraft = { shortTitle: "Disney Toniebox Starter Set", facebookBody: "Disney Toniebox Starter Set is now $59.00, was $99.00." };
+const aiResponse = draft => ({ response: JSON.stringify(draft) });
+function sequenceProvider(responses) {
+  const requests = [];
+  const provider = new WorkersAICopyProvider({ run: async (model, options) => {
+    requests.push({ model, options });
+    return responses[requests.length - 1];
+  } }, "@cf/meta/llama-3.2-3b-instruct");
+  return { provider, requests };
+}
+test("valid AI copy succeeds after exactly one inference", async () => {
+  const p = extractWalmartProduct(withWas, input, walmart);
+  const { provider, requests } = sequenceProvider([aiResponse(validAiDraft)]);
+  const content = await generateProductCopy(p, provider);
+  assert.equal(content.attemptsUsed, 1);
+  assert.equal(requests.length, 1);
+  assert.ok(content.facebookPost.endsWith(input));
+});
+for (const [name, firstResponse, reason] of [
+  ["malformed JSON", { response: "not json" }, "AI_BAD_JSON"],
+  ["missing required fields", { response: "{}" }, "AI_SHORT_TITLE_EMPTY"],
+  ["changed current price", aiResponse({ ...validAiDraft, facebookBody: "Disney Toniebox Starter Set is now $49.00, was $99.00." }), "AI_CURRENT_PRICE_MISMATCH"],
+  ["omitted old price", aiResponse({ ...validAiDraft, facebookBody: "Disney Toniebox Starter Set is now $59.00." }), "AI_OLD_PRICE_MISSING"],
+  ["sales wording in title", aiResponse({ ...validAiDraft, shortTitle: "Now Disney Toniebox Starter Set" }), "AI_SHORT_TITLE_HAS_SALES_LANGUAGE"],
+  ["URL in body", aiResponse({ ...validAiDraft, facebookBody: `${validAiDraft.facebookBody} https://wrong.example/item` }), "AI_FACEBOOK_BODY_HAS_URL"],
+  ["affiliate disclosure in body", aiResponse({ ...validAiDraft, facebookBody: `#Ad ${validAiDraft.facebookBody}` }), "AI_FACEBOOK_BODY_HAS_DISCLOSURE"],
+  ["calculated percentage in body", aiResponse({ ...validAiDraft, facebookBody: `${validAiDraft.facebookBody} Save 40%.` }), "AI_UNSUPPORTED_CLAIM"]
+]) {
+  test(`AI retries once after ${name} and sends no affiliate URL in either request`, async () => {
+    const p = extractWalmartProduct(withWas, input, walmart);
+    const { provider, requests } = sequenceProvider([firstResponse, aiResponse(validAiDraft)]);
+    const failures = [];
+    const content = await generateProductCopy(p, provider, "#Ad", failure => failures.push(failure));
+    assert.equal(content.attemptsUsed, 2);
+    assert.equal(requests.length, 2);
+    assert.deepEqual(failures, [{ attempt: 1, errorCode: "AI_INVALID_CONTENT", validationReason: reason }]);
+    assert.ok(requests[1].options.messages[2].content.includes(reason));
+    assert.ok(requests.every(request => !JSON.stringify(request.options).includes(input)));
+    assert.ok(content.facebookPost.endsWith(input));
+  });
+}
+test("two malformed AI responses fail with AI_INVALID_CONTENT after exactly two attempts", async () => {
+  const p = extractWalmartProduct(withWas, input, walmart);
+  const { provider, requests } = sequenceProvider([{ response: "not json" }, { response: "still not json" }]);
+  const failures = [];
+  await assert.rejects(generateProductCopy(p, provider, "#Ad", failure => failures.push(failure)), { code: "AI_INVALID_CONTENT", validationReason: "AI_BAD_JSON" });
+  assert.equal(requests.length, 2);
+  assert.deepEqual(failures.map(failure => failure.attempt), [1, 2]);
+});
+test("two AI responses omitting a real old price still fail", async () => {
+  const p = extractWalmartProduct(withWas, input, walmart);
+  const missing = aiResponse({ ...validAiDraft, facebookBody: "Disney Toniebox Starter Set is now $59.00." });
+  const { provider, requests } = sequenceProvider([missing, missing]);
+  await assert.rejects(generateProductCopy(p, provider), { code: "AI_INVALID_CONTENT", validationReason: "AI_OLD_PRICE_MISSING" });
+  assert.equal(requests.length, 2);
+});
+test("Workers AI service failures are not retried as content errors", async () => {
+  const p = extractWalmartProduct(withWas, input, walmart);
+  let calls = 0;
+  const provider = new WorkersAICopyProvider({ run: async () => { calls++; throw new Error("service unavailable"); } }, "@cf/meta/llama-3.2-3b-instruct");
+  await assert.rejects(generateProductCopy(p, provider), { code: "AI_PROVIDER_FAILED" });
+  assert.equal(calls, 1);
+});
+test("AI retry logs only safe reason and reports two attempts on success", async () => {
+  const originalLog = console.log;
+  const originalWarn = console.warn;
+  const logs = [];
+  const responses = [new Response(null, { status: 302, headers: { location: walmart } }), new Response(withWas, { headers: { "content-type": "text/html" } }), new Response(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), { headers: { "content-type": "image/png" } })];
+  try {
+    console.log = line => logs.push(JSON.parse(line));
+    console.warn = line => logs.push(JSON.parse(line));
+    const { provider } = sequenceProvider([{ response: "not json" }, aiResponse(validAiDraft)]);
+    await processProductLink(input, { fetcher: async () => responses.shift(), dnsCheck: async () => {}, copyProvider: provider, renderer: { screenshot: async () => ({ bytes: new Uint8Array([137, 80, 78, 71]), mimeType: "image/png" }) }, disclosure: "#Ad", requestId: "ai-retry-log-test" });
+    assert.deepEqual(logs.filter(item => item.event === "ai_attempt_failed").map(item => [item.attempt, item.errorCode, item.validationReason]), [[1, "AI_INVALID_CONTENT", "AI_BAD_JSON"]]);
+    assert.equal(logs.find(item => item.event === "ai_complete").attemptsUsed, 2);
+    assert.ok(!JSON.stringify(logs).includes(input));
+  } finally { console.log = originalLog; console.warn = originalWarn; }
 });
 test("long title stays bounded and image aspect ratio is preserved", () => {
   const p = extractWalmartProduct(withWas, input, walmart);
@@ -192,4 +272,59 @@ test("mocked Telegram job sends progress, card, and separate affiliate copy", as
     assert.equal(screenshotCalls, 1);
     assert.equal(aiCalls, 1);
   } finally { global.fetch = original; }
+});
+test("AI job failure logs processing failure, then sends generic Telegram error without a delivery-failure log", async () => {
+  const originalFetch = global.fetch;
+  const originalError = console.error;
+  const originalWarn = console.warn;
+  const errors = [];
+  const warnings = [];
+  const sent = [];
+  let aiCalls = 0;
+  try {
+    console.error = line => errors.push(JSON.parse(line));
+    console.warn = line => warnings.push(JSON.parse(line));
+    global.fetch = async function (url, init) {
+      assert.equal(this, globalThis);
+      const address = String(url);
+      if (address.startsWith("https://api.telegram.org/")) {
+        sent.push(JSON.parse(init.body));
+        return Response.json({ ok: true });
+      }
+      if (address.startsWith("https://cloudflare-dns.com/")) return Response.json({ Status: 0, Answer: address.endsWith("type=A") ? [{ type: 1, data: "1.1.1.1" }] : [] });
+      if (address === input) return new Response(null, { status: 302, headers: { location: walmart } });
+      if (address === walmart) return new Response(withWas, { headers: { "content-type": "text/html" } });
+      throw new Error("Unexpected fetch in AI failure test");
+    };
+    const env = { TELEGRAM_BOT_TOKEN: "test-token", AI_TEXT_MODEL: "@cf/meta/llama-3.2-3b-instruct", AI: { run: async () => { aiCalls++; return { response: "not json" }; } }, AFFILIATE_DISCLOSURE: "#Ad" };
+    await processTelegramJob({ chatId: 123, inputUrl: input, requestId: "processing-failure-test" }, env);
+    assert.equal(aiCalls, 2);
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1].text, "I found the product but couldn't generate the card text. Please try again.");
+    assert.deepEqual(warnings.filter(item => item.event === "ai_attempt_failed").map(item => item.attempt), [1, 2]);
+    assert.equal(errors.find(item => item.event === "process_failed").validationReason, "AI_BAD_JSON");
+    assert.equal(typeof errors.find(item => item.event === "process_failed").aiDurationMs, "number");
+    assert.equal(errors.find(item => item.event === "job_processing_failed").validationReason, "AI_BAD_JSON");
+    assert.ok(!errors.some(item => item.event === "telegram_delivery_failed"));
+    assert.ok(!JSON.stringify([...errors, ...warnings]).includes(input));
+  } finally { global.fetch = originalFetch; console.error = originalError; console.warn = originalWarn; }
+});
+test("actual Telegram API failure logs telegram_delivery_failed, not job_processing_failed", async () => {
+  const originalFetch = global.fetch;
+  const originalError = console.error;
+  const errors = [];
+  let sendCalls = 0;
+  try {
+    console.error = line => errors.push(JSON.parse(line));
+    global.fetch = async function (url) {
+      assert.equal(this, globalThis);
+      assert.match(String(url), /api\.telegram\.org/);
+      sendCalls++;
+      return sendCalls === 1 ? Response.json({ ok: false }, { status: 500 }) : Response.json({ ok: true });
+    };
+    await processTelegramJob({ chatId: 123, inputUrl: input, requestId: "telegram-failure-test" }, { TELEGRAM_BOT_TOKEN: "test-token" });
+    assert.equal(sendCalls, 2);
+    assert.equal(errors.find(item => item.event === "telegram_delivery_failed").operation, "progress_message");
+    assert.ok(!errors.some(item => item.event === "job_processing_failed"));
+  } finally { global.fetch = originalFetch; console.error = originalError; }
 });

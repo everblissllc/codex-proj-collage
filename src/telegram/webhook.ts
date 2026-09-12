@@ -76,9 +76,26 @@ export async function processTelegramJob(job: TelegramJob, env: Env): Promise<vo
   const { chatId, inputUrl, requestId, telegramUserId } = job;
   const telegram = new TelegramApi(env.TELEGRAM_BOT_TOKEN);
   console.log(JSON.stringify({ event: "queue_job_started", requestId, telegramUserId }));
+  const sendErrorMessage = async (error: unknown): Promise<void> => {
+    try {
+      await telegram.sendMessage(chatId, telegramErrorMessage(error));
+    } catch {
+      console.error(JSON.stringify({ event: "telegram_error_message_failed", requestId, telegramUserId, errorCode: "TELEGRAM_API_ERROR" }));
+    }
+  };
+  const logDeliveryFailure = (operation: string): void => {
+    console.error(JSON.stringify({ event: "telegram_delivery_failed", requestId, telegramUserId, operation, errorCode: "TELEGRAM_API_ERROR" }));
+  };
   try {
     await telegram.sendMessage(chatId, "⏳ Creating your product card...");
-    const result = await processProductLink(inputUrl, {
+  } catch (error) {
+    logDeliveryFailure("progress_message");
+    await sendErrorMessage(error);
+    return;
+  }
+  let result: Awaited<ReturnType<typeof processProductLink>>;
+  try {
+    result = await processProductLink(inputUrl, {
       fetcher: workerFetch,
       copyProvider: new WorkersAICopyProvider(env.AI, env.AI_TEXT_MODEL),
       renderer: new BrowserScreenshotRenderer(env.BROWSER),
@@ -86,16 +103,24 @@ export async function processTelegramJob(job: TelegramJob, env: Env): Promise<vo
       requestId,
       telegramUserId
     });
+  } catch (error) {
+    console.error(JSON.stringify({ event: "job_processing_failed", requestId, telegramUserId, errorStage: error instanceof ProductError ? error.stage : "unknown", errorCode: error instanceof ProductError ? error.code : "UNEXPECTED_ERROR", validationReason: error instanceof ProductError ? error.validationReason : undefined }));
+    await sendErrorMessage(error);
+    return;
+  }
+  try {
     await telegram.sendPhoto(chatId, result.card);
     console.log(JSON.stringify({ event: "telegram_photo_sent", requestId, telegramUserId }));
+  } catch (error) {
+    logDeliveryFailure("photo");
+    await sendErrorMessage(error);
+    return;
+  }
+  try {
     await telegram.sendMessage(chatId, `✅ Facebook post:\n\n${result.content.facebookPost}`);
     console.log(JSON.stringify({ event: "telegram_copy_sent", requestId, telegramUserId, success: true }));
   } catch (error) {
-    console.error(JSON.stringify({ event: "telegram_delivery_failed", requestId, telegramUserId, errorCode: error instanceof ProductError ? error.code : "UNEXPECTED_ERROR" }));
-    try {
-      await telegram.sendMessage(chatId, telegramErrorMessage(error));
-    } catch (deliveryError) {
-      console.error(JSON.stringify({ event: "telegram_error_message_failed", requestId, errorCode: deliveryError instanceof ProductError ? deliveryError.code : "TELEGRAM_API_ERROR" }));
-    }
+    logDeliveryFailure("facebook_copy");
+    await sendErrorMessage(error);
   }
 }

@@ -41,9 +41,15 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
     extractionDurationMs = Date.now() - extractionStart;
     console.log(JSON.stringify({ event: "extraction_complete", ...base, store, hostname, extractionDurationMs }));
     const aiStart = Date.now();
-    const content = await generateProductCopy(product, deps.copyProvider, deps.disclosure);
-    aiDurationMs = Date.now() - aiStart;
-    console.log(JSON.stringify({ event: "ai_complete", ...base, store, aiDurationMs }));
+    let content: Awaited<ReturnType<typeof generateProductCopy>>;
+    try {
+      content = await generateProductCopy(product, deps.copyProvider, deps.disclosure, failure => {
+        console.warn(JSON.stringify({ event: "ai_attempt_failed", ...base, ...failure }));
+      });
+    } finally {
+      aiDurationMs = Date.now() - aiStart;
+    }
+    console.log(JSON.stringify({ event: "ai_complete", ...base, store, aiDurationMs, attemptsUsed: content.attemptsUsed }));
     const renderStart = Date.now();
     const card = await renderCard(product, content, deps.renderer, deps.fetcher, deps.dnsCheck, deps.requestId);
     renderDurationMs = Date.now() - renderStart;
@@ -53,7 +59,7 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
   } catch (error) {
     errorStage = error instanceof ProductError ? error.stage : "unknown";
     errorCode = error instanceof ProductError ? error.code : "UNEXPECTED_ERROR";
-    console.error(JSON.stringify({ event: "process_failed", ...base, store, hostname, extractionDurationMs, aiDurationMs, renderDurationMs, totalDurationMs: Date.now() - started, success: false, errorStage, errorCode }));
+    console.error(JSON.stringify({ event: "process_failed", ...base, store, hostname, extractionDurationMs, aiDurationMs, renderDurationMs, totalDurationMs: Date.now() - started, success: false, errorStage, errorCode, validationReason: error instanceof ProductError ? error.validationReason : undefined }));
     throw error;
   }
 }
