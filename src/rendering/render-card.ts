@@ -6,9 +6,11 @@ import { walmartCardHtml } from "../stores/walmart/template";
 import { walmartTheme } from "../stores/walmart/theme";
 import { workerFetch, type FetchLike } from "../network/worker-fetch";
 
-async function fetchImageAsDataUrl(url: string, fetcher: FetchLike, dnsCheck: DnsCheck, requestId?: string): Promise<string> {
+type EmbeddedImage = { dataUrl: string; mimeType: string; byteLength: number };
+
+async function fetchImageAsDataUrl(url: string, fetcher: FetchLike, dnsCheck: DnsCheck, requestId?: string): Promise<EmbeddedImage> {
   validatePublicUrl(url);
-  const { response } = await resolveUrl(url, fetcher, "image/webp,image/png,image/jpeg", dnsCheck);
+  const { response, resolvedUrl } = await resolveUrl(url, fetcher, "image/webp,image/png,image/jpeg", dnsCheck);
   if (!response.ok || response.status >= 300) throw new ProductError("IMAGE_FETCH_FAILED", "render", `Image returned HTTP ${response.status}`);
   const mime = response.headers.get("content-type")?.split(";")[0].toLowerCase();
   if (!mime || !["image/jpeg", "image/png", "image/webp"].includes(mime)) throw new ProductError("INVALID_IMAGE_TYPE", "render", `Unsupported image type ${mime}`);
@@ -32,15 +34,22 @@ async function fetchImageAsDataUrl(url: string, fetcher: FetchLike, dnsCheck: Dn
     mime === "image/jpeg" ? bytes.length >= 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255 :
     bytes.length >= 12 && String.fromCharCode(...bytes.subarray(0, 4)) === "RIFF" && String.fromCharCode(...bytes.subarray(8, 12)) === "WEBP";
   if (!valid) throw new ProductError("INVALID_IMAGE_DATA", "render", "Product image bytes do not match its declared type");
-  console.log(JSON.stringify({ event: "product_image_downloaded", requestId, hostname: new URL(url).hostname, mimeType: mime, bytes: bytes.length }));
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  const imageFingerprint = Array.from(digest.subarray(0, 8), byte => byte.toString(16).padStart(2, "0")).join("");
+  console.log(JSON.stringify({ event: "product_image_downloaded", requestId, hostname: new URL(resolvedUrl).hostname, mimeType: mime, bytes: bytes.length, imageByteLength: bytes.length, imageFingerprint }));
   let binary = "";
   for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
-  return `data:${mime};base64,${btoa(binary)}`;
+  return { dataUrl: `data:${mime};base64,${btoa(binary)}`, mimeType: mime, byteLength: bytes.length };
 }
 
 export async function renderWalmartCard(product: ProductData, content: GeneratedContent, renderer: ScreenshotRenderer, fetcher: FetchLike = workerFetch, dnsCheck: DnsCheck = assertPublicDns, requestId?: string): Promise<CardImage> {
-  const imageData = await fetchImageAsDataUrl(product.imageUrl, fetcher, dnsCheck, requestId);
-  return renderer.screenshot(walmartCardHtml(product, content, imageData), walmartTheme.width, walmartTheme.height);
+  const image = await fetchImageAsDataUrl(product.imageUrl, fetcher, dnsCheck, requestId);
+  const html = walmartCardHtml(product, content, image.dataUrl);
+  console.log(JSON.stringify({
+    event: "browser_render_started", requestId, width: walmartTheme.width, height: walmartTheme.height,
+    htmlLength: html.length, embeddedImageMimeType: image.mimeType, embeddedImageByteLength: image.byteLength
+  }));
+  return renderer.screenshot(html, walmartTheme.width, walmartTheme.height, requestId);
 }
 
 export async function renderCard(product: ProductData, content: GeneratedContent, renderer: ScreenshotRenderer, fetcher: FetchLike = workerFetch, dnsCheck: DnsCheck = assertPublicDns, requestId?: string): Promise<CardImage> {

@@ -104,7 +104,7 @@ export async function processTelegramJob(job: TelegramJob, env: Env): Promise<vo
       telegramUserId
     });
   } catch (error) {
-    console.error(JSON.stringify({ event: "job_processing_failed", requestId, telegramUserId, errorStage: error instanceof ProductError ? error.stage : "unknown", errorCode: error instanceof ProductError ? error.code : "UNEXPECTED_ERROR", validationReason: error instanceof ProductError ? error.validationReason : undefined }));
+    console.error(JSON.stringify({ event: "job_processing_failed", requestId, telegramUserId, errorStage: error instanceof ProductError ? error.stage : "unknown", errorCode: error instanceof ProductError ? error.code : "UNEXPECTED_ERROR", validationReason: error instanceof ProductError ? error.validationReason : undefined, ...(error instanceof ProductError ? error.browserDiagnostics : undefined) }));
     await sendErrorMessage(error);
     return;
   }

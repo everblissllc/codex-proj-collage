@@ -12,6 +12,15 @@ import type { FetchLike } from "../network/worker-fetch";
 export type ProcessDeps = { fetcher: FetchLike; copyProvider: CopyProvider; renderer: ScreenshotRenderer; disclosure: string; requestId: string; telegramUserId?: number; dnsCheck?: DnsCheck };
 export type ProcessResult = { product: ProductData; content: GeneratedContent; card: CardImage };
 
+function walmartProductId(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    return new URL(url).pathname.match(/\/ip\/(?:[^/]+\/)?(\d+)(?:\/|$)/i)?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
 export async function processProductLink(inputUrl: string, deps: ProcessDeps): Promise<ProcessResult> {
   const started = Date.now();
   const base = { requestId: deps.requestId, telegramUserId: deps.telegramUserId };
@@ -39,7 +48,7 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
     const html = await readLimitedText(page.response);
     const product = extractWalmartProduct(html, inputUrl, page.resolvedUrl);
     extractionDurationMs = Date.now() - extractionStart;
-    console.log(JSON.stringify({ event: "extraction_complete", ...base, store, hostname, extractionDurationMs }));
+    console.log(JSON.stringify({ event: "extraction_complete", ...base, store, hostname, canonicalProductId: walmartProductId(product.canonicalProductUrl ?? product.resolvedUrl), extractionDurationMs }));
     const aiStart = Date.now();
     let content: Awaited<ReturnType<typeof generateProductCopy>>;
     try {
@@ -51,15 +60,19 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
     }
     console.log(JSON.stringify({ event: "ai_complete", ...base, store, aiDurationMs, attemptsUsed: content.attemptsUsed }));
     const renderStart = Date.now();
-    const card = await renderCard(product, content, deps.renderer, deps.fetcher, deps.dnsCheck, deps.requestId);
-    renderDurationMs = Date.now() - renderStart;
+    let card: CardImage;
+    try {
+      card = await renderCard(product, content, deps.renderer, deps.fetcher, deps.dnsCheck, deps.requestId);
+    } finally {
+      renderDurationMs = Date.now() - renderStart;
+    }
     console.log(JSON.stringify({ event: "render_complete", ...base, store, renderDurationMs, mimeType: card.mimeType }));
     console.log(JSON.stringify({ event: "process_complete", ...base, store, hostname, extractionDurationMs, aiDurationMs, renderDurationMs, totalDurationMs: Date.now() - started, success: true }));
     return { product, content, card };
   } catch (error) {
     errorStage = error instanceof ProductError ? error.stage : "unknown";
     errorCode = error instanceof ProductError ? error.code : "UNEXPECTED_ERROR";
-    console.error(JSON.stringify({ event: "process_failed", ...base, store, hostname, extractionDurationMs, aiDurationMs, renderDurationMs, totalDurationMs: Date.now() - started, success: false, errorStage, errorCode, validationReason: error instanceof ProductError ? error.validationReason : undefined }));
+    console.error(JSON.stringify({ event: "process_failed", ...base, store, hostname, extractionDurationMs, aiDurationMs, renderDurationMs, totalDurationMs: Date.now() - started, success: false, errorStage, errorCode, validationReason: error instanceof ProductError ? error.validationReason : undefined, ...(error instanceof ProductError ? error.browserDiagnostics : undefined) }));
     throw error;
   }
 }

@@ -11,6 +11,7 @@ const { normalizePrice } = src("stores/walmart/price.js");
 const { parseCopyDraft, parseWorkersAIResponse, WorkersAICopyProvider } = src("ai/workers-ai-provider.js");
 const { generateProductCopy } = src("ai/generate-product-copy.js");
 const { walmartCardHtml } = src("stores/walmart/template.js");
+const { BrowserScreenshotRenderer } = src("rendering/browser-renderer.js");
 const { processProductLink } = src("orchestration/process-product-link.js");
 const { handleTelegramWebhook, processTelegramJob } = src("telegram/webhook.js");
 const withWas = readFileSync("test/fixtures/walmart-with-was.html", "utf8");
@@ -200,6 +201,143 @@ test("long title stays bounded and image aspect ratio is preserved", () => {
   assert.ok(html.includes("object-fit:contain"));
   assert.ok(html.includes("$59.00"));
   assert.ok(html.includes("$99.00"));
+});
+test("non-2xx Browser Run response retains safe status and reason without logging response content", async () => {
+  const originalError = console.error;
+  const logs = [];
+  const sensitiveHtml = `<img src="data:image/png;base64,SECRET"><a href="${input}">product</a>`;
+  try {
+    console.error = line => logs.push(JSON.parse(line));
+    const browser = { quickAction: async (action, options) => {
+      assert.equal(action, "screenshot");
+      assert.equal(options.html, sensitiveHtml);
+      return new Response(JSON.stringify({ success: false, errors: [{ message: `Navigation timeout at ${input} data:image/png;base64,SECRET` }] }), {
+        status: 500, statusText: "Internal Server Error",
+        headers: { "content-type": "application/json", "x-browser-ms-used": "30000" }
+      });
+    } };
+    const renderer = new BrowserScreenshotRenderer(browser);
+    await assert.rejects(renderer.screenshot(sensitiveHtml, 1200, 1200, "browser-error-test"), error => {
+      assert.equal(error.code, "BROWSER_ERROR");
+      assert.equal(error.browserDiagnostics.browserStatus, 500);
+      assert.equal(error.browserDiagnostics.browserStatusText, "Internal Server Error");
+      assert.equal(error.browserDiagnostics.browserMsUsed, 30000);
+      assert.equal(error.browserDiagnostics.browserReason, "BROWSER_TIMEOUT");
+      assert.equal(typeof error.browserDiagnostics.browserDurationMs, "number");
+      return true;
+    });
+    assert.equal(logs[0].event, "browser_render_failed");
+    assert.equal(logs[0].browserReason, "BROWSER_TIMEOUT");
+    assert.ok(!JSON.stringify(logs).includes(input));
+    assert.ok(!JSON.stringify(logs).includes("data:image"));
+    assert.ok(!JSON.stringify(logs).includes("SECRET"));
+  } finally { console.error = originalError; }
+});
+test("Browser Run status maps to safe rate-limit and service reasons", async () => {
+  for (const [status, reason] of [[429, "BROWSER_RATE_LIMIT"], [503, "BROWSER_SERVICE_UNAVAILABLE"], [400, "BROWSER_BAD_REQUEST"], [422, "BROWSER_UNKNOWN_ERROR"]]) {
+    const originalError = console.error;
+    try {
+      console.error = () => {};
+      const renderer = new BrowserScreenshotRenderer({ quickAction: async () => new Response(null, { status }) });
+      await assert.rejects(renderer.screenshot("<main></main>", 1200, 1200), error => {
+        assert.equal(error.code, "BROWSER_ERROR");
+        assert.equal(error.browserDiagnostics.browserStatus, status);
+        assert.equal(error.browserDiagnostics.browserReason, reason);
+        return true;
+      });
+    } finally { console.error = originalError; }
+  }
+});
+test("nonstandard Browser status text is omitted from logs", async () => {
+  const originalError = console.error;
+  const logs = [];
+  try {
+    console.error = line => logs.push(JSON.parse(line));
+    const renderer = new BrowserScreenshotRenderer({ quickAction: async () => new Response(null, { status: 500, statusText: `SECRET ${input}` }) });
+    await assert.rejects(renderer.screenshot("<main></main>", 1200, 1200), { code: "BROWSER_ERROR" });
+    assert.equal(logs[0].browserStatusText, undefined);
+    assert.ok(!JSON.stringify(logs).includes(input));
+    assert.ok(!JSON.stringify(logs).includes("SECRET"));
+  } finally { console.error = originalError; }
+});
+test("render diagnostics compare image and HTML metadata without logging URLs or data URLs", async () => {
+  const originalLog = console.log;
+  const originalError = console.error;
+  const logs = [];
+  const p = extractWalmartProduct(withWas, input, walmart);
+  const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  let submittedHtmlLength = 0;
+  try {
+    console.log = line => logs.push(JSON.parse(line));
+    console.error = line => logs.push(JSON.parse(line));
+    const renderer = new BrowserScreenshotRenderer({ quickAction: async (action, options) => {
+      assert.equal(action, "screenshot");
+      submittedHtmlLength = options.html.length;
+      return new Response(png, { headers: { "content-type": "image/png", "x-browser-ms-used": "12" } });
+    } });
+    const result = await processProductLink(input, {
+      fetcher: async url => url === input
+        ? new Response(null, { status: 302, headers: { location: walmart } })
+        : url === walmart
+          ? new Response(withWas, { headers: { "content-type": "text/html" } })
+          : new Response(png, { headers: { "content-type": "image/png" } }),
+      dnsCheck: async () => {},
+      copyProvider: { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set" }) },
+      renderer, disclosure: "#Ad", requestId: "render-metadata-test"
+    });
+    assert.equal(result.card.mimeType, "image/png");
+    assert.equal(logs.find(item => item.event === "extraction_complete").canonicalProductId, "123");
+    assert.equal(logs.find(item => item.event === "extraction_complete").hostname, "www.walmart.com");
+    const image = logs.find(item => item.event === "product_image_downloaded");
+    assert.equal(image.hostname, "i5.walmartimages.com");
+    assert.equal(image.mimeType, "image/png");
+    assert.equal(image.imageByteLength, png.byteLength);
+    assert.match(image.imageFingerprint, /^[a-f0-9]{16}$/);
+    const started = logs.find(item => item.event === "browser_render_started");
+    assert.equal(started.htmlLength, submittedHtmlLength);
+    assert.equal(started.embeddedImageMimeType, "image/png");
+    assert.equal(started.embeddedImageByteLength, png.byteLength);
+    assert.equal(started.width, 1200);
+    assert.equal(started.height, 1200);
+    const complete = logs.find(item => item.event === "browser_render_complete");
+    assert.equal(complete.outputBytes, png.byteLength);
+    assert.equal(complete.mimeType, "image/png");
+    assert.equal(complete.browserMsUsed, 12);
+    assert.equal(typeof complete.browserDurationMs, "number");
+    assert.ok(!JSON.stringify(logs).includes(input));
+    assert.ok(!JSON.stringify(logs).includes("data:image"));
+    assert.ok(!JSON.stringify(logs).includes("<!doctype html>"));
+  } finally { console.log = originalLog; console.error = originalError; }
+});
+test("render failure keeps Browser diagnostics in process_failed with measured render duration", async () => {
+  const originalLog = console.log;
+  const originalError = console.error;
+  const logs = [];
+  const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  try {
+    console.log = line => logs.push(JSON.parse(line));
+    console.error = line => logs.push(JSON.parse(line));
+    const renderer = new BrowserScreenshotRenderer({ quickAction: async () => new Response(JSON.stringify({ success: false, errors: [{ message: "Navigation timed out" }] }), { status: 500, headers: { "content-type": "application/json" } }) });
+    await assert.rejects(processProductLink(input, {
+      fetcher: async url => url === input
+        ? new Response(null, { status: 302, headers: { location: walmart } })
+        : url === walmart
+          ? new Response(withWas, { headers: { "content-type": "text/html" } })
+          : new Response(png, { headers: { "content-type": "image/png" } }),
+      dnsCheck: async () => {},
+      copyProvider: { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set" }) },
+      renderer, disclosure: "#Ad", requestId: "render-failure-test"
+    }), { code: "BROWSER_ERROR" });
+    const failure = logs.find(item => item.event === "process_failed");
+    assert.equal(failure.errorStage, "render");
+    assert.equal(failure.errorCode, "BROWSER_ERROR");
+    assert.equal(failure.browserStatus, 500);
+    assert.equal(failure.browserReason, "BROWSER_TIMEOUT");
+    assert.equal(typeof failure.browserDurationMs, "number");
+    assert.equal(typeof failure.renderDurationMs, "number");
+    assert.ok(!JSON.stringify(logs).includes(input));
+    assert.ok(!JSON.stringify(logs).includes("data:image"));
+  } finally { console.log = originalLog; console.error = originalError; }
 });
 test("unsupported store stops before AI and rendering", async () => {
   let called = false;
