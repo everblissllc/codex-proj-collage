@@ -105,6 +105,7 @@ describe("orchestration", () => {
     expect(result.product.resolvedUrl).toBe(walmart);
     expect(result.content.facebookPost.endsWith(input)).toBe(true);
     expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([input, walmart, result.product.imageUrl]);
     expect(renderer.screenshot).toHaveBeenCalledTimes(1);
   });
 });

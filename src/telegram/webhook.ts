@@ -4,6 +4,7 @@ import { WorkersAICopyProvider } from "../ai/workers-ai-provider";
 import { BrowserScreenshotRenderer } from "../rendering/browser-renderer";
 import { processProductLink } from "../orchestration/process-product-link";
 import { TelegramApi } from "./api";
+import { workerFetch } from "../network/worker-fetch";
 
 export type Env = {
   TELEGRAM_BOT_TOKEN: string;
@@ -78,7 +79,7 @@ export async function processTelegramJob(job: TelegramJob, env: Env): Promise<vo
   try {
     await telegram.sendMessage(chatId, "⏳ Creating your product card...");
     const result = await processProductLink(inputUrl, {
-      fetcher: fetch,
+      fetcher: workerFetch,
       copyProvider: new WorkersAICopyProvider(env.AI, env.AI_TEXT_MODEL),
       renderer: new BrowserScreenshotRenderer(env.BROWSER),
       disclosure: env.AFFILIATE_DISCLOSURE || "#Ad",

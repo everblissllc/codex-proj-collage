@@ -26,7 +26,7 @@ export type DnsCheck = (hostname: string) => Promise<void>;
 export const assertPublicDns: DnsCheck = async hostname => {
   const queries = await Promise.all(["A", "AAAA"].map(async type => {
     const endpoint = `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=${type}`;
-    const response = await fetch(endpoint, { headers: { accept: "application/dns-json" }, signal: AbortSignal.timeout(5000) });
+    const response = await globalThis.fetch(endpoint, { headers: { accept: "application/dns-json" }, signal: AbortSignal.timeout(5000) });
     if (!response.ok) throw new ProductError("DNS_CHECK_FAILED", "url", `DNS check returned HTTP ${response.status}`);
     return await response.json() as { Status?: number; Answer?: Array<{ type?: number; data?: string }> };
   }));

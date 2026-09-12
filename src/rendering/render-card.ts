@@ -4,8 +4,9 @@ import { resolveUrl } from "../stores/resolve-url";
 import type { CardImage, ScreenshotRenderer } from "./types";
 import { walmartCardHtml } from "../stores/walmart/template";
 import { walmartTheme } from "../stores/walmart/theme";
+import { workerFetch, type FetchLike } from "../network/worker-fetch";
 
-async function fetchImageAsDataUrl(url: string, fetcher: typeof fetch, dnsCheck: DnsCheck, requestId?: string): Promise<string> {
+async function fetchImageAsDataUrl(url: string, fetcher: FetchLike, dnsCheck: DnsCheck, requestId?: string): Promise<string> {
   validatePublicUrl(url);
   const { response } = await resolveUrl(url, fetcher, "image/webp,image/png,image/jpeg", dnsCheck);
   if (!response.ok || response.status >= 300) throw new ProductError("IMAGE_FETCH_FAILED", "render", `Image returned HTTP ${response.status}`);
@@ -37,12 +38,12 @@ async function fetchImageAsDataUrl(url: string, fetcher: typeof fetch, dnsCheck:
   return `data:${mime};base64,${btoa(binary)}`;
 }
 
-export async function renderWalmartCard(product: ProductData, content: GeneratedContent, renderer: ScreenshotRenderer, fetcher: typeof fetch = fetch, dnsCheck: DnsCheck = assertPublicDns, requestId?: string): Promise<CardImage> {
+export async function renderWalmartCard(product: ProductData, content: GeneratedContent, renderer: ScreenshotRenderer, fetcher: FetchLike = workerFetch, dnsCheck: DnsCheck = assertPublicDns, requestId?: string): Promise<CardImage> {
   const imageData = await fetchImageAsDataUrl(product.imageUrl, fetcher, dnsCheck, requestId);
   return renderer.screenshot(walmartCardHtml(product, content, imageData), walmartTheme.width, walmartTheme.height);
 }
 
-export async function renderCard(product: ProductData, content: GeneratedContent, renderer: ScreenshotRenderer, fetcher: typeof fetch = fetch, dnsCheck: DnsCheck = assertPublicDns, requestId?: string): Promise<CardImage> {
+export async function renderCard(product: ProductData, content: GeneratedContent, renderer: ScreenshotRenderer, fetcher: FetchLike = workerFetch, dnsCheck: DnsCheck = assertPublicDns, requestId?: string): Promise<CardImage> {
   if (product.store !== "walmart") throw new ProductError("UNSUPPORTED_STORE", "store", `No template for ${product.store}`);
   try { return await renderWalmartCard(product, content, renderer, fetcher, dnsCheck, requestId); }
   catch (error) {

@@ -123,11 +123,33 @@ test("unsupported store stops before AI and rendering", async () => {
 });
 test("orchestration uses one page fetch and one image fetch", async () => {
   const responses = [new Response(null, { status: 302, headers: { location: walmart } }), new Response(withWas, { headers: { "content-type": "text/html" } }), new Response(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), { headers: { "content-type": "image/png" } })];
-  let calls = 0; let renders = 0;
-  const result = await processProductLink(input, { fetcher: async () => { calls++; return responses.shift(); }, dnsCheck: async () => {}, copyProvider: { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set", facebookBody: "Disney Toniebox Starter Set is now $59.00, was $99.00." }) }, renderer: { screenshot: async () => { renders++; return { bytes: new Uint8Array([137, 80, 78, 71]), mimeType: "image/png" }; } }, disclosure: "#Ad", requestId: "test" });
+  const fetchedUrls = []; let renders = 0;
+  const result = await processProductLink(input, { fetcher: async url => { fetchedUrls.push(url); return responses.shift(); }, dnsCheck: async () => {}, copyProvider: { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set", facebookBody: "Disney Toniebox Starter Set is now $59.00, was $99.00." }) }, renderer: { screenshot: async () => { renders++; return { bytes: new Uint8Array([137, 80, 78, 71]), mimeType: "image/png" }; } }, disclosure: "#Ad", requestId: "test" });
   assert.equal(result.product.resolvedUrl, walmart);
-  assert.equal(calls, 3);
+  assert.deepEqual(fetchedUrls.slice(0, 2), [input, walmart]);
+  assert.match(fetchedUrls[2], /^https:\/\/i5\.walmartimages\.com\//);
   assert.equal(renders, 1);
+});
+test("authenticated /start sends the invalid-link reply with the native fetch receiver", async () => {
+  const original = global.fetch;
+  const sent = [];
+  const waits = [];
+  let queued = false;
+  try {
+    global.fetch = function (url, init) {
+      assert.equal(this, globalThis);
+      assert.match(String(url), /^https:\/\/api\.telegram\.org\/bottest-token\/sendMessage$/);
+      sent.push(JSON.parse(init.body));
+      return Promise.resolve(Response.json({ ok: true }));
+    };
+    const env = { TELEGRAM_BOT_TOKEN: "test-token", TELEGRAM_WEBHOOK_SECRET: "secret", PRODUCT_JOBS: { send: async () => { queued = true; } } };
+    const request = new Request("https://bot.example/telegram/webhook", { method: "POST", headers: { "X-Telegram-Bot-Api-Secret-Token": "secret" }, body: JSON.stringify({ message: { text: "/start", chat: { id: 123 }, from: { id: 456 } } }) });
+    const response = await handleTelegramWebhook(request, env, { waitUntil: promise => { waits.push(promise); } });
+    await Promise.all(waits);
+    assert.equal(response.status, 200);
+    assert.equal(queued, false);
+    assert.deepEqual(sent, [{ chat_id: 123, text: "Please send a valid product link.", disable_web_page_preview: true }]);
+  } finally { global.fetch = original; }
 });
 test("Telegram webhook authenticates and enqueues exact link", async () => {
   let queued;
@@ -148,7 +170,8 @@ test("mocked Telegram job sends progress, card, and separate affiliate copy", as
   let aiCalls = 0;
   const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
   try {
-    global.fetch = async (url, init) => {
+    global.fetch = async function (url, init) {
+      assert.equal(this, globalThis);
       const address = String(url);
       if (address.startsWith("https://api.telegram.org/")) {
         const method = address.split("/").pop();

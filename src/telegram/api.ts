@@ -1,7 +1,8 @@
 import type { CardImage } from "../rendering/types";
+import { workerFetch, type FetchLike } from "../network/worker-fetch";
 
 export class TelegramApi {
-  constructor(private readonly token: string, private readonly fetcher: typeof fetch = fetch) {}
+  constructor(private readonly token: string, private readonly fetcher: FetchLike = workerFetch) {}
   private async call(method: string, body: BodyInit, headers?: HeadersInit): Promise<void> {
     const response = await this.fetcher(`https://api.telegram.org/bot${this.token}/${method}`, {
       method: "POST", body, headers, signal: AbortSignal.timeout(15000)

@@ -7,8 +7,9 @@ import { generateProductCopy } from "../ai/generate-product-copy";
 import type { CopyProvider } from "../ai/provider";
 import { renderCard } from "../rendering/render-card";
 import type { CardImage, ScreenshotRenderer } from "../rendering/types";
+import type { FetchLike } from "../network/worker-fetch";
 
-export type ProcessDeps = { fetcher: typeof fetch; copyProvider: CopyProvider; renderer: ScreenshotRenderer; disclosure: string; requestId: string; telegramUserId?: number; dnsCheck?: DnsCheck };
+export type ProcessDeps = { fetcher: FetchLike; copyProvider: CopyProvider; renderer: ScreenshotRenderer; disclosure: string; requestId: string; telegramUserId?: number; dnsCheck?: DnsCheck };
 export type ProcessResult = { product: ProductData; content: GeneratedContent; card: CardImage };
 
 export async function processProductLink(inputUrl: string, deps: ProcessDeps): Promise<ProcessResult> {

@@ -1,10 +1,10 @@
 import { ProductError } from "../types";
 import { assertPublicDns, validatePublicUrl, type DnsCheck } from "./safe-url";
+import { workerFetch, type FetchLike } from "../network/worker-fetch";
 
 export type ResolvedPage = { resolvedUrl: string; response: Response };
-export type FetchLike = typeof fetch;
 
-export async function resolveUrl(inputUrl: string, fetcher: FetchLike = fetch, accept = "text/html,application/xhtml+xml", dnsCheck: DnsCheck = assertPublicDns): Promise<ResolvedPage> {
+export async function resolveUrl(inputUrl: string, fetcher: FetchLike = workerFetch, accept = "text/html,application/xhtml+xml", dnsCheck: DnsCheck = assertPublicDns): Promise<ResolvedPage> {
   let current = validatePublicUrl(inputUrl);
   const seen = new Set<string>();
   for (let hop = 0; hop <= 5; hop++) {
