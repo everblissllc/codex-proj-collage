@@ -4,6 +4,7 @@ import { detectStore } from "../src/stores/detect-store";
 import { resolveUrl } from "../src/stores/resolve-url";
 import { validatePublicUrl } from "../src/stores/safe-url";
 import { extractWalmartProduct } from "../src/stores/walmart/extractor";
+import { inspectWalmartHtml } from "../src/stores/walmart/diagnostics";
 import { normalizePrice } from "../src/stores/walmart/price";
 import { parseCopyDraft, parseWorkersAIResponse } from "../src/ai/workers-ai-provider";
 import { generateProductCopy } from "../src/ai/generate-product-copy";
@@ -59,6 +60,12 @@ describe("Walmart extraction", () => {
   it("rejects missing product images", () => {
     expect(() => extractWalmartProduct(currentOnly.replace(/<meta property="og:image"[^>]+>/, ""), input, walmart)).toThrowError(expect.objectContaining({ code: "MISSING_IMAGE" }));
   });
+  it("reports safe title-source and challenge flags without changing extraction", () => {
+    expect(inspectWalmartHtml(withWas, walmart)).toMatchObject({ canonicalProductId: "123", hasJsonLdProduct: true, hasNextData: false, hasOgTitle: false, challengeDetected: false });
+    const challenge = "<html><head><title>Robot or human?</title></head><body>Please press and hold.</body></html>";
+    expect(inspectWalmartHtml(challenge, walmart)).toMatchObject({ hasJsonLdProduct: false, hasOgTitle: false, hasStandardTitleOrProductMeta: true, challengeDetected: true });
+    expect(() => extractWalmartProduct(challenge, input, walmart)).toThrowError(expect.objectContaining({ code: "MISSING_TITLE" }));
+  });
 });
 
 describe("copy and rendering", () => {
@@ -90,6 +97,10 @@ describe("copy and rendering", () => {
     expect(html).toContain("object-fit:contain");
     expect(html).toContain("$59.00");
     expect(html).toContain("$99.00");
+    expect(html).toContain('loading="eager" decoding="sync"');
+    expect(html).toContain("image.decode().then(markReady)");
+    expect(html).not.toContain(input);
+    expect(html).not.toMatch(/https?:\/\/|@import|<link\b|<script[^>]+src\s*=/i);
   });
   it("hides an absent old price", () => {
     const html = walmartCardHtml({ ...product, oldPrice: undefined }, { shortTitle: "Disney Toniebox Starter Set", facebookPost: "" }, "data:image/png;base64,AAAA");

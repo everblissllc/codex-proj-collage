@@ -62,8 +62,17 @@ export class BrowserScreenshotRenderer implements ScreenshotRenderer {
   async screenshot(html: string, width: number, height: number, requestId?: string): Promise<CardImage> {
     const started = Date.now();
     try {
+      const readySelector = '.card[data-card-ready="true"]';
       const response = await this.browser.quickAction("screenshot", {
-        html, viewport: { width, height }, screenshotOptions: { type: "png" }
+        html,
+        viewport: { width, height },
+        screenshotOptions: { type: "png" },
+        gotoOptions: { waitUntil: "domcontentloaded", timeout: 8000 },
+        waitForSelector: { selector: readySelector, visible: true, timeout: 5000 },
+        selector: readySelector,
+        setJavaScriptEnabled: true,
+        actionTimeout: 8000,
+        bestAttempt: true
       });
       if (!response.ok) {
         const message = await boundedErrorMessage(response).catch(() => "");

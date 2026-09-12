@@ -1,8 +1,9 @@
 import { ProductError, type GeneratedContent, type ProductData } from "../types";
 import { detectStore } from "../stores/detect-store";
-import { resolveUrl, readLimitedText } from "../stores/resolve-url";
+import { resolveUrl, readLimitedTextWithSize } from "../stores/resolve-url";
 import { validatePublicUrl, type DnsCheck } from "../stores/safe-url";
 import { extractWalmartProduct } from "../stores/walmart/extractor";
+import { inspectWalmartHtml, walmartProductId } from "../stores/walmart/diagnostics";
 import { generateProductCopy } from "../ai/generate-product-copy";
 import type { CopyProvider } from "../ai/provider";
 import { renderCard } from "../rendering/render-card";
@@ -11,15 +12,6 @@ import type { FetchLike } from "../network/worker-fetch";
 
 export type ProcessDeps = { fetcher: FetchLike; copyProvider: CopyProvider; renderer: ScreenshotRenderer; disclosure: string; requestId: string; telegramUserId?: number; dnsCheck?: DnsCheck };
 export type ProcessResult = { product: ProductData; content: GeneratedContent; card: CardImage };
-
-function walmartProductId(url: string | undefined): string | undefined {
-  if (!url) return undefined;
-  try {
-    return new URL(url).pathname.match(/\/ip\/(?:[^/]+\/)?(\d+)(?:\/|$)/i)?.[1];
-  } catch {
-    return undefined;
-  }
-}
 
 export async function processProductLink(inputUrl: string, deps: ProcessDeps): Promise<ProcessResult> {
   const started = Date.now();
@@ -45,7 +37,15 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
       await page.response.body?.cancel();
       throw new ProductError("UNSUPPORTED_STORE", "store", `Unsupported store: ${store ?? "unknown"}`);
     }
-    const html = await readLimitedText(page.response);
+    const { text: html, byteLength: responseByteLength } = await readLimitedTextWithSize(page.response);
+    const contentTypeHeader = page.response.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+    const contentType = contentTypeHeader && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(contentTypeHeader) ? contentTypeHeader : "unknown";
+    const diagnostics = inspectWalmartHtml(html, page.resolvedUrl);
+    console.log(JSON.stringify({
+      event: "walmart_extraction_diagnostics", ...base,
+      httpStatus: page.response.status, contentType, responseByteLength, htmlLength: html.length,
+      hostname, redirectCount: page.redirectCount, ...diagnostics
+    }));
     const product = extractWalmartProduct(html, inputUrl, page.resolvedUrl);
     extractionDurationMs = Date.now() - extractionStart;
     console.log(JSON.stringify({ event: "extraction_complete", ...base, store, hostname, canonicalProductId: walmartProductId(product.canonicalProductUrl ?? product.resolvedUrl), extractionDurationMs }));

@@ -2,7 +2,7 @@ import { ProductError } from "../types";
 import { assertPublicDns, validatePublicUrl, type DnsCheck } from "./safe-url";
 import { workerFetch, type FetchLike } from "../network/worker-fetch";
 
-export type ResolvedPage = { resolvedUrl: string; response: Response };
+export type ResolvedPage = { resolvedUrl: string; response: Response; redirectCount: number };
 
 export async function resolveUrl(inputUrl: string, fetcher: FetchLike = workerFetch, accept = "text/html,application/xhtml+xml", dnsCheck: DnsCheck = assertPublicDns): Promise<ResolvedPage> {
   let current = validatePublicUrl(inputUrl);
@@ -28,12 +28,12 @@ export async function resolveUrl(inputUrl: string, fetcher: FetchLike = workerFe
       continue;
     }
     // No automatic redirects: each destination is validated before it is fetched.
-    return { resolvedUrl: current.href, response };
+    return { resolvedUrl: current.href, response, redirectCount: hop };
   }
   throw new ProductError("TOO_MANY_REDIRECTS", "url", "Too many redirects");
 }
 
-export async function readLimitedText(response: Response, maxBytes = 3_000_000): Promise<string> {
+export async function readLimitedTextWithSize(response: Response, maxBytes = 3_000_000): Promise<{ text: string; byteLength: number }> {
   if (!response.ok) throw new ProductError("STORE_HTTP_ERROR", "extraction", `Store returned HTTP ${response.status}`);
   const type = response.headers.get("content-type") ?? "";
   if (type && !/(text\/html|application\/xhtml\+xml)/i.test(type)) throw new ProductError("NOT_HTML", "extraction", `Unexpected content type ${type}`);
@@ -52,5 +52,9 @@ export async function readLimitedText(response: Response, maxBytes = 3_000_000):
   const out = new Uint8Array(size);
   let offset = 0;
   for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.byteLength; }
-  return new TextDecoder().decode(out);
+  return { text: new TextDecoder().decode(out), byteLength: size };
+}
+
+export async function readLimitedText(response: Response, maxBytes = 3_000_000): Promise<string> {
+  return (await readLimitedTextWithSize(response, maxBytes)).text;
 }

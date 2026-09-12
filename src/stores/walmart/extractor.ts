@@ -8,14 +8,14 @@ function entity(text: string): string {
     return map[all.toLowerCase()] ?? (decimal ? String.fromCodePoint(Number(decimal)) : all);
   });
 }
-function meta(html: string, key: string): string | undefined {
+export function meta(html: string, key: string): string | undefined {
   for (const tag of html.match(/<meta\b[^>]*>/gi) ?? []) {
     const attrs = Object.fromEntries([...tag.matchAll(/([\w:-]+)\s*=\s*(["'])(.*?)\2/g)].map(m => [m[1].toLowerCase(), entity(m[3])]));
     if (attrs.property?.toLowerCase() === key || attrs.name?.toLowerCase() === key) return attrs.content;
   }
   return undefined;
 }
-function jsonLdProducts(html: string): Record<string, unknown>[] {
+export function jsonLdProducts(html: string): Record<string, unknown>[] {
   const products: Record<string, unknown>[] = [];
   const visit = (item: unknown): void => {
     if (!item || typeof item !== "object") return;

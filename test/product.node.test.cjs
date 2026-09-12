@@ -7,6 +7,7 @@ const { detectStore } = src("stores/detect-store.js");
 const { validatePublicUrl, assertPublicDns, findProductUrl } = src("stores/safe-url.js");
 const { resolveUrl } = src("stores/resolve-url.js");
 const { extractWalmartProduct } = src("stores/walmart/extractor.js");
+const { inspectWalmartHtml } = src("stores/walmart/diagnostics.js");
 const { normalizePrice } = src("stores/walmart/price.js");
 const { parseCopyDraft, parseWorkersAIResponse, WorkersAICopyProvider } = src("ai/workers-ai-provider.js");
 const { generateProductCopy } = src("ai/generate-product-copy.js");
@@ -33,6 +34,7 @@ test("short link resolves with manual redirects", async () => {
   const responses = [new Response(null, { status: 302, headers: { location: walmart } }), new Response(withWas, { headers: { "content-type": "text/html" } })];
   const page = await resolveUrl(input, async (url, init) => { calls.push([url, init]); return responses.shift(); }, undefined, async () => {});
   assert.equal(page.resolvedUrl, walmart);
+  assert.equal(page.redirectCount, 1);
   assert.equal(calls.length, 2);
   assert.equal(calls[0][1].redirect, "manual");
 });
@@ -74,6 +76,87 @@ test("embedded Walmart state fallback", () => {
   const p = extractWalmartProduct(html, input, walmart);
   assert.equal(p.rawTitle, "Toniebox Elsa");
   assert.equal(p.oldPrice.value, 99);
+});
+test("normal Walmart fixtures expose only safe title-source diagnostics", () => {
+  assert.deepEqual(inspectWalmartHtml(withWas, walmart), {
+    canonicalProductId: "123",
+    hasJsonLdProduct: true,
+    hasNextData: false,
+    hasOgTitle: false,
+    hasStandardTitleOrProductMeta: false,
+    challengeDetected: false
+  });
+  const og = inspectWalmartHtml(currentOnly, walmart);
+  assert.equal(og.hasJsonLdProduct, false);
+  assert.equal(og.hasOgTitle, true);
+  assert.equal(og.challengeDetected, false);
+  const nextData = `<script id="__NEXT_DATA__" type="application/json">{"props":{}}</script>`;
+  assert.equal(inspectWalmartHtml(nextData, walmart).hasNextData, true);
+});
+test("missing-title and Walmart challenge pages are identified without supplying a title", () => {
+  const missing = "<!doctype html><html><head></head><body>Unavailable</body></html>";
+  assert.deepEqual(inspectWalmartHtml(missing, walmart), {
+    canonicalProductId: "123",
+    hasJsonLdProduct: false,
+    hasNextData: false,
+    hasOgTitle: false,
+    hasStandardTitleOrProductMeta: false,
+    challengeDetected: false
+  });
+  assert.throws(() => extractWalmartProduct(missing, input, walmart), { code: "MISSING_TITLE" });
+  const challenge = "<!doctype html><html><head><title>Robot or human?</title></head><body>Please press and hold to verify you're a human.</body></html>";
+  const diagnostic = inspectWalmartHtml(challenge, walmart);
+  assert.equal(diagnostic.hasStandardTitleOrProductMeta, true);
+  assert.equal(diagnostic.hasOgTitle, false);
+  assert.equal(diagnostic.challengeDetected, true);
+  assert.throws(() => extractWalmartProduct(challenge, input, walmart), { code: "MISSING_TITLE" });
+});
+test("MISSING_TITLE logs fetched-page metadata immediately before failure without leaking HTML or affiliate URL", async () => {
+  const originalLog = console.log;
+  const originalError = console.error;
+  const logs = [];
+  const secretMarker = "SECRET_CUSTOMER_INFORMATION";
+  const challenge = `<!doctype html><html><head><title>Robot or human?</title><link rel="canonical" href="${walmart}?tracking=SECRET"></head><body>Press and hold — ${secretMarker} ${input}</body></html>`;
+  try {
+    console.log = line => logs.push(JSON.parse(line));
+    console.error = line => logs.push(JSON.parse(line));
+    let fetches = 0;
+    await assert.rejects(processProductLink(input, {
+      fetcher: async () => {
+        fetches++;
+        return fetches === 1
+          ? new Response(null, { status: 302, headers: { location: walmart } })
+          : new Response(challenge, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+      },
+      dnsCheck: async () => {},
+      copyProvider: { generate: async () => { throw new Error("AI should not run"); } },
+      renderer: { screenshot: async () => { throw new Error("Browser should not run"); } },
+      disclosure: "#Ad", requestId: "missing-title-test"
+    }), { code: "MISSING_TITLE" });
+    assert.equal(fetches, 2);
+    const diagnostic = logs.find(item => item.event === "walmart_extraction_diagnostics");
+    assert.equal(diagnostic.requestId, "missing-title-test");
+    assert.equal(diagnostic.httpStatus, 200);
+    assert.equal(diagnostic.contentType, "text/html");
+    assert.equal(diagnostic.responseByteLength, Buffer.byteLength(challenge, "utf8"));
+    assert.ok(diagnostic.responseByteLength > diagnostic.htmlLength);
+    assert.equal(diagnostic.htmlLength, challenge.length);
+    assert.equal(diagnostic.hostname, "www.walmart.com");
+    assert.equal(diagnostic.redirectCount, 1);
+    assert.equal(diagnostic.canonicalProductId, "123");
+    assert.equal(diagnostic.hasJsonLdProduct, false);
+    assert.equal(diagnostic.hasNextData, false);
+    assert.equal(diagnostic.hasOgTitle, false);
+    assert.equal(diagnostic.hasStandardTitleOrProductMeta, true);
+    assert.equal(diagnostic.challengeDetected, true);
+    const failureIndex = logs.findIndex(item => item.event === "process_failed");
+    assert.equal(logs[failureIndex - 1].event, "walmart_extraction_diagnostics");
+    assert.equal(logs[failureIndex].errorCode, "MISSING_TITLE");
+    assert.ok(!JSON.stringify(logs).includes(input));
+    assert.ok(!JSON.stringify(logs).includes("tracking=SECRET"));
+    assert.ok(!JSON.stringify(logs).includes(secretMarker));
+    assert.ok(!JSON.stringify(logs).includes("<!doctype html>"));
+  } finally { console.log = originalLog; console.error = originalError; }
 });
 test("failed AI JSON content is rejected", () => {
   assert.throws(() => parseCopyDraft({ shortTitle: "Now $59" }), { code: "AI_INVALID_CONTENT", validationReason: "AI_SHORT_TITLE_HAS_PRICE" });
@@ -201,6 +284,14 @@ test("long title stays bounded and image aspect ratio is preserved", () => {
   assert.ok(html.includes("object-fit:contain"));
   assert.ok(html.includes("$59.00"));
   assert.ok(html.includes("$99.00"));
+  assert.ok(html.includes('<main class="card">'));
+  assert.ok(html.includes('<div class="image-area">'));
+  assert.ok(html.includes('<div class="title-area">'));
+  assert.ok(html.includes('<div class="price-row">'));
+  assert.ok(html.includes('loading="eager" decoding="sync"'));
+  assert.ok(html.includes("image.decode().then(markReady)"));
+  assert.ok(!html.includes(input));
+  assert.doesNotMatch(html, /https?:\/\/|@import|<link\b|<script[^>]+src\s*=|url\(\s*['"]?https?:/i);
 });
 test("non-2xx Browser Run response retains safe status and reason without logging response content", async () => {
   const originalError = console.error;
@@ -248,6 +339,20 @@ test("Browser Run status maps to safe rate-limit and service reasons", async () 
     } finally { console.error = originalError; }
   }
 });
+test("Cloudflare 422 timeout response still maps to BROWSER_TIMEOUT", async () => {
+  const originalError = console.error;
+  try {
+    console.error = () => {};
+    const renderer = new BrowserScreenshotRenderer({ quickAction: async () => new Response(JSON.stringify({ success: false, errors: [{ message: "Navigation timeout" }] }), { status: 422, statusText: "Unprocessable Entity", headers: { "content-type": "application/json", "x-browser-ms-used": "0" } }) });
+    await assert.rejects(renderer.screenshot("<main></main>", 1200, 1200), error => {
+      assert.equal(error.code, "BROWSER_ERROR");
+      assert.equal(error.browserDiagnostics.browserReason, "BROWSER_TIMEOUT");
+      assert.equal(error.browserDiagnostics.browserStatus, 422);
+      assert.equal(error.browserDiagnostics.browserMsUsed, 0);
+      return true;
+    });
+  } finally { console.error = originalError; }
+});
 test("nonstandard Browser status text is omitted from logs", async () => {
   const originalError = console.error;
   const logs = [];
@@ -266,13 +371,22 @@ test("render diagnostics compare image and HTML metadata without logging URLs or
   const logs = [];
   const p = extractWalmartProduct(withWas, input, walmart);
   const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
-  let submittedHtmlLength = 0;
+  let submittedHtml = "";
   try {
     console.log = line => logs.push(JSON.parse(line));
     console.error = line => logs.push(JSON.parse(line));
     const renderer = new BrowserScreenshotRenderer({ quickAction: async (action, options) => {
       assert.equal(action, "screenshot");
-      submittedHtmlLength = options.html.length;
+      submittedHtml = options.html;
+      assert.deepEqual(options.gotoOptions, { waitUntil: "domcontentloaded", timeout: 8000 });
+      assert.deepEqual(options.waitForSelector, { selector: '.card[data-card-ready="true"]', visible: true, timeout: 5000 });
+      assert.equal(options.selector, '.card[data-card-ready="true"]');
+      assert.equal(options.setJavaScriptEnabled, true);
+      assert.equal(options.actionTimeout, 8000);
+      assert.equal(options.bestAttempt, true);
+      assert.equal(options.waitForTimeout, undefined);
+      assert.deepEqual(options.screenshotOptions, { type: "png" });
+      assert.deepEqual(options.viewport, { width: 1200, height: 1200 });
       return new Response(png, { headers: { "content-type": "image/png", "x-browser-ms-used": "12" } });
     } });
     const result = await processProductLink(input, {
@@ -286,6 +400,20 @@ test("render diagnostics compare image and HTML metadata without logging URLs or
       renderer, disclosure: "#Ad", requestId: "render-metadata-test"
     });
     assert.equal(result.card.mimeType, "image/png");
+    const extraction = logs.find(item => item.event === "walmart_extraction_diagnostics");
+    assert.equal(extraction.httpStatus, 200);
+    assert.equal(extraction.contentType, "text/html");
+    assert.equal(extraction.responseByteLength, Buffer.byteLength(withWas, "utf8"));
+    assert.equal(extraction.redirectCount, 1);
+    assert.equal(extraction.hasJsonLdProduct, true);
+    assert.equal(extraction.hasNextData, false);
+    assert.equal(extraction.hasOgTitle, false);
+    assert.equal(extraction.challengeDetected, false);
+    assert.deepEqual(result.card.bytes, png);
+    assert.match(submittedHtml, /<img src="data:image\/png;base64,[A-Za-z0-9+/=]+"/);
+    assert.ok(submittedHtml.includes("image.decode().then(markReady)"));
+    assert.ok(!submittedHtml.includes(input));
+    assert.doesNotMatch(submittedHtml, /https?:\/\/|@import|<link\b|<script[^>]+src\s*=|url\(\s*['"]?https?:/i);
     assert.equal(logs.find(item => item.event === "extraction_complete").canonicalProductId, "123");
     assert.equal(logs.find(item => item.event === "extraction_complete").hostname, "www.walmart.com");
     const image = logs.find(item => item.event === "product_image_downloaded");
@@ -294,7 +422,7 @@ test("render diagnostics compare image and HTML metadata without logging URLs or
     assert.equal(image.imageByteLength, png.byteLength);
     assert.match(image.imageFingerprint, /^[a-f0-9]{16}$/);
     const started = logs.find(item => item.event === "browser_render_started");
-    assert.equal(started.htmlLength, submittedHtmlLength);
+    assert.equal(started.htmlLength, submittedHtml.length);
     assert.equal(started.embeddedImageMimeType, "image/png");
     assert.equal(started.embeddedImageByteLength, png.byteLength);
     assert.equal(started.width, 1200);
