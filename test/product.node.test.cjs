@@ -75,8 +75,9 @@ test("embedded Walmart state fallback", () => {
   assert.equal(p.oldPrice.value, 99);
 });
 test("failed AI JSON content is rejected", () => {
-  assert.throws(() => parseCopyDraft({ shortTitle: "Now $59", facebookBody: "Buy" }), { code: "AI_INVALID_CONTENT" });
-  assert.throws(() => parseCopyDraft({ shortTitle: "Toniebox", facebookBody: "https://wrong.link" }), { code: "AI_INVALID_CONTENT" });
+  assert.throws(() => parseCopyDraft({ shortTitle: "Now $59" }), { code: "AI_INVALID_CONTENT", validationReason: "AI_SHORT_TITLE_HAS_PRICE" });
+  assert.throws(() => parseCopyDraft({ shortTitle: "Toniebox https://wrong.link" }), { code: "AI_INVALID_CONTENT", validationReason: "AI_SHORT_TITLE_HAS_URL" });
+  assert.throws(() => parseCopyDraft({ shortTitle: "Disney Toniebox", facebookBody: "Buy" }), { code: "AI_INVALID_CONTENT", validationReason: "AI_UNEXPECTED_FIELD" });
 });
 test("malformed Workers AI JSON response fails explicitly", async () => {
   const p = extractWalmartProduct(withWas, input, walmart);
@@ -90,28 +91,29 @@ test("Workers AI provider makes one URL-free text inference and accepts fenced J
     calls++;
     assert.equal(model, "@cf/meta/llama-3.2-3b-instruct");
     assert.ok(!JSON.stringify(options).includes(input));
+    assert.ok(!JSON.stringify(options).includes(p.currentPrice.formatted));
+    assert.ok(!JSON.stringify(options).includes(p.oldPrice.formatted));
     assert.equal(options.messages.length, 2);
-    return { response: '```json\n{"shortTitle":"Disney Toniebox Starter Set","facebookBody":"Disney Toniebox Starter Set is now $59.00, was $99.00."}\n```' };
+    return { response: '```json\n{"shortTitle":"Disney Toniebox Starter Set"}\n```' };
   } }, "@cf/meta/llama-3.2-3b-instruct");
   const draft = await provider.generate(p);
   assert.equal(draft.shortTitle, "Disney Toniebox Starter Set");
   assert.equal(calls, 1);
-  assert.throws(() => parseWorkersAIResponse({ response: { shortTitle: "Now $59", facebookBody: "Buy" } }), { code: "AI_INVALID_CONTENT" });
+  assert.throws(() => parseWorkersAIResponse({ response: { shortTitle: "Now $59" } }), { code: "AI_INVALID_CONTENT" });
 });
-test("exact affiliate URL is appended outside AI", async () => {
+test("current and old prices and exact affiliate URL are appended by code", async () => {
   const p = extractWalmartProduct(withWas, input, walmart);
-  const copy = await generateProductCopy(p, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set", facebookBody: "Disney Toniebox Starter Set is now $59.00, was $99.00." }) }, "#Ad");
-  assert.ok(copy.facebookPost.endsWith(input));
+  const copy = await generateProductCopy(p, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set" }) }, "#Ad");
+  assert.equal(copy.facebookPost, `#Ad 🚨 Disney Toniebox Starter Set is now $59.00, was $99.00.\n\n👉 ${input}`);
   assert.ok(!copy.facebookPost.includes(walmart));
+  assert.ok(!/daily wear|vacation trips|beach outings/i.test(copy.facebookPost));
 });
-test("AI body cannot change or omit authoritative prices", async () => {
-  const p = extractWalmartProduct(withWas, input, walmart);
-  await assert.rejects(generateProductCopy(p, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set", facebookBody: "Disney Toniebox Starter Set is now $49.00, was $99.00." }) }), { code: "AI_INVALID_CONTENT", validationReason: "AI_CURRENT_PRICE_MISMATCH" });
-  await assert.rejects(generateProductCopy(p, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set", facebookBody: "Disney Toniebox Starter Set is now $59.00." }) }), { code: "AI_INVALID_CONTENT", validationReason: "AI_OLD_PRICE_MISSING" });
-  await assert.rejects(generateProductCopy(p, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set", facebookBody: "Disney Toniebox Starter Set is now $59.00, was $98.00." }) }), { code: "AI_INVALID_CONTENT", validationReason: "AI_OLD_PRICE_MISMATCH" });
-  await assert.rejects(generateProductCopy(p, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set", facebookBody: "Disney Toniebox Starter Set is now $59.00, was $99.00. Save another $5.00." }) }), { code: "AI_INVALID_CONTENT", validationReason: "AI_UNEXPECTED_PRICE" });
+test("current-only Facebook post is built exactly from source price and affiliate URL", async () => {
+  const p = extractWalmartProduct(currentOnly, input, walmart);
+  const copy = await generateProductCopy(p, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set" }) }, "#Ad");
+  assert.equal(copy.facebookPost, `#Ad 🚨 Disney Toniebox Starter Set is now $59.00.\n\n👉 ${input}`);
 });
-const validAiDraft = { shortTitle: "Disney Toniebox Starter Set", facebookBody: "Disney Toniebox Starter Set is now $59.00, was $99.00." };
+const validAiDraft = { shortTitle: "Disney Toniebox Starter Set" };
 const aiResponse = draft => ({ response: JSON.stringify(draft) });
 function sequenceProvider(responses) {
   const requests = [];
@@ -121,7 +123,7 @@ function sequenceProvider(responses) {
   } }, "@cf/meta/llama-3.2-3b-instruct");
   return { provider, requests };
 }
-test("valid AI copy succeeds after exactly one inference", async () => {
+test("valid AI title succeeds after exactly one inference", async () => {
   const p = extractWalmartProduct(withWas, input, walmart);
   const { provider, requests } = sequenceProvider([aiResponse(validAiDraft)]);
   const content = await generateProductCopy(p, provider);
@@ -131,13 +133,12 @@ test("valid AI copy succeeds after exactly one inference", async () => {
 });
 for (const [name, firstResponse, reason] of [
   ["malformed JSON", { response: "not json" }, "AI_BAD_JSON"],
-  ["missing required fields", { response: "{}" }, "AI_SHORT_TITLE_EMPTY"],
-  ["changed current price", aiResponse({ ...validAiDraft, facebookBody: "Disney Toniebox Starter Set is now $49.00, was $99.00." }), "AI_CURRENT_PRICE_MISMATCH"],
-  ["omitted old price", aiResponse({ ...validAiDraft, facebookBody: "Disney Toniebox Starter Set is now $59.00." }), "AI_OLD_PRICE_MISSING"],
+  ["empty title", { response: "{}" }, "AI_SHORT_TITLE_EMPTY"],
   ["sales wording in title", aiResponse({ ...validAiDraft, shortTitle: "Now Disney Toniebox Starter Set" }), "AI_SHORT_TITLE_HAS_SALES_LANGUAGE"],
-  ["URL in body", aiResponse({ ...validAiDraft, facebookBody: `${validAiDraft.facebookBody} https://wrong.example/item` }), "AI_FACEBOOK_BODY_HAS_URL"],
-  ["affiliate disclosure in body", aiResponse({ ...validAiDraft, facebookBody: `#Ad ${validAiDraft.facebookBody}` }), "AI_FACEBOOK_BODY_HAS_DISCLOSURE"],
-  ["calculated percentage in body", aiResponse({ ...validAiDraft, facebookBody: `${validAiDraft.facebookBody} Save 40%.` }), "AI_UNSUPPORTED_CLAIM"]
+  ["price in title", aiResponse({ ...validAiDraft, shortTitle: "Disney Toniebox $59.00" }), "AI_SHORT_TITLE_HAS_PRICE"],
+  ["URL in title", aiResponse({ ...validAiDraft, shortTitle: "Disney Toniebox https://wrong.example/item" }), "AI_SHORT_TITLE_HAS_URL"],
+  ["lifestyle claim in title", aiResponse({ ...validAiDraft, shortTitle: "Midi Dress perfect for beach outings" }), "AI_SHORT_TITLE_HAS_PROMOTIONAL_CLAIM"],
+  ["disclosure in title", aiResponse({ ...validAiDraft, shortTitle: "#Ad Disney Toniebox" }), "AI_SHORT_TITLE_HAS_DISCLOSURE"]
 ]) {
   test(`AI retries once after ${name} and sends no affiliate URL in either request`, async () => {
     const p = extractWalmartProduct(withWas, input, walmart);
@@ -149,6 +150,8 @@ for (const [name, firstResponse, reason] of [
     assert.deepEqual(failures, [{ attempt: 1, errorCode: "AI_INVALID_CONTENT", validationReason: reason }]);
     assert.ok(requests[1].options.messages[2].content.includes(reason));
     assert.ok(requests.every(request => !JSON.stringify(request.options).includes(input)));
+    assert.ok(requests.every(request => !JSON.stringify(request.options).includes(p.currentPrice.formatted)));
+    assert.ok(requests.every(request => !JSON.stringify(request.options).includes(p.oldPrice.formatted)));
     assert.ok(content.facebookPost.endsWith(input));
   });
 }
@@ -160,11 +163,11 @@ test("two malformed AI responses fail with AI_INVALID_CONTENT after exactly two 
   assert.equal(requests.length, 2);
   assert.deepEqual(failures.map(failure => failure.attempt), [1, 2]);
 });
-test("two AI responses omitting a real old price still fail", async () => {
+test("two invalid titles still fail", async () => {
   const p = extractWalmartProduct(withWas, input, walmart);
-  const missing = aiResponse({ ...validAiDraft, facebookBody: "Disney Toniebox Starter Set is now $59.00." });
-  const { provider, requests } = sequenceProvider([missing, missing]);
-  await assert.rejects(generateProductCopy(p, provider), { code: "AI_INVALID_CONTENT", validationReason: "AI_OLD_PRICE_MISSING" });
+  const invalid = aiResponse({ shortTitle: "Now Disney Toniebox" });
+  const { provider, requests } = sequenceProvider([invalid, invalid]);
+  await assert.rejects(generateProductCopy(p, provider), { code: "AI_INVALID_CONTENT", validationReason: "AI_SHORT_TITLE_HAS_SALES_LANGUAGE" });
   assert.equal(requests.length, 2);
 });
 test("Workers AI service failures are not retried as content errors", async () => {
@@ -195,6 +198,8 @@ test("long title stays bounded and image aspect ratio is preserved", () => {
   assert.ok(html.includes("font-size:49px"));
   assert.ok(html.includes("-webkit-line-clamp:3"));
   assert.ok(html.includes("object-fit:contain"));
+  assert.ok(html.includes("$59.00"));
+  assert.ok(html.includes("$99.00"));
 });
 test("unsupported store stops before AI and rendering", async () => {
   let called = false;
@@ -204,7 +209,7 @@ test("unsupported store stops before AI and rendering", async () => {
 test("orchestration uses one page fetch and one image fetch", async () => {
   const responses = [new Response(null, { status: 302, headers: { location: walmart } }), new Response(withWas, { headers: { "content-type": "text/html" } }), new Response(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), { headers: { "content-type": "image/png" } })];
   const fetchedUrls = []; let renders = 0;
-  const result = await processProductLink(input, { fetcher: async url => { fetchedUrls.push(url); return responses.shift(); }, dnsCheck: async () => {}, copyProvider: { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set", facebookBody: "Disney Toniebox Starter Set is now $59.00, was $99.00." }) }, renderer: { screenshot: async () => { renders++; return { bytes: new Uint8Array([137, 80, 78, 71]), mimeType: "image/png" }; } }, disclosure: "#Ad", requestId: "test" });
+  const result = await processProductLink(input, { fetcher: async url => { fetchedUrls.push(url); return responses.shift(); }, dnsCheck: async () => {}, copyProvider: { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set" }) }, renderer: { screenshot: async () => { renders++; return { bytes: new Uint8Array([137, 80, 78, 71]), mimeType: "image/png" }; } }, disclosure: "#Ad", requestId: "test" });
   assert.equal(result.product.resolvedUrl, walmart);
   assert.deepEqual(fetchedUrls.slice(0, 2), [input, walmart]);
   assert.match(fetchedUrls[2], /^https:\/\/i5\.walmartimages\.com\//);
@@ -264,11 +269,11 @@ test("mocked Telegram job sends progress, card, and separate affiliate copy", as
       if (address.includes("walmartimages.com")) return new Response(png, { headers: { "content-type": "image/png" } });
       throw new Error(`Unexpected fetch: ${address}`);
     };
-    const env = { TELEGRAM_BOT_TOKEN: "test-token", AI_TEXT_MODEL: "@cf/meta/llama-3.2-3b-instruct", AI: { run: async (model, options) => { aiCalls++; assert.equal(model, "@cf/meta/llama-3.2-3b-instruct"); assert.ok(!JSON.stringify(options).includes(input)); return { response: JSON.stringify({ shortTitle: "Disney Toniebox Starter Set", facebookBody: "Disney Toniebox Starter Set is now $59.00, was $99.00." }) }; } }, AFFILIATE_DISCLOSURE: "#Ad", BROWSER: { quickAction: async (action, options) => { screenshotCalls++; assert.equal(action, "screenshot"); assert.ok(options.html.includes("data:image/png;base64,")); assert.ok(!options.html.includes(input)); return new Response(png, { headers: { "content-type": "image/png" } }); } } };
+    const env = { TELEGRAM_BOT_TOKEN: "test-token", AI_TEXT_MODEL: "@cf/meta/llama-3.2-3b-instruct", AI: { run: async (model, options) => { aiCalls++; assert.equal(model, "@cf/meta/llama-3.2-3b-instruct"); assert.ok(!JSON.stringify(options).includes(input)); return { response: JSON.stringify({ shortTitle: "Disney Toniebox Starter Set" }) }; } }, AFFILIATE_DISCLOSURE: "#Ad", BROWSER: { quickAction: async (action, options) => { screenshotCalls++; assert.equal(action, "screenshot"); assert.ok(options.html.includes("data:image/png;base64,")); assert.ok(!options.html.includes(input)); return new Response(png, { headers: { "content-type": "image/png" } }); } } };
     await processTelegramJob({ chatId: 123, inputUrl: input, telegramUserId: 456, requestId: "end-to-end-test" }, env);
     assert.deepEqual(sent.map(x => x.method), ["sendMessage", "sendPhoto", "sendMessage"]);
     assert.match(sent[0].body.text, /Creating your product card/);
-    assert.ok(sent[2].body.text.endsWith(input));
+    assert.equal(sent[2].body.text, `✅ Facebook post:\n\n#Ad 🚨 Disney Toniebox Starter Set is now $59.00, was $99.00.\n\n👉 ${input}`);
     assert.equal(screenshotCalls, 1);
     assert.equal(aiCalls, 1);
   } finally { global.fetch = original; }

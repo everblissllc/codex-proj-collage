@@ -12,7 +12,7 @@ export type ProductData = {
   oldPrice?: Price;
 };
 export type GeneratedContent = { shortTitle: string; facebookPost: string };
-export type CopyDraft = { shortTitle: string; facebookBody: string };
+export type CopyDraft = { shortTitle: string };
 
 export class ProductError extends Error {
   constructor(public readonly code: string, public readonly stage: string, message: string, public readonly validationReason?: string) {

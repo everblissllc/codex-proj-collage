@@ -64,23 +64,32 @@ describe("Walmart extraction", () => {
 describe("copy and rendering", () => {
   const product = extractWalmartProduct(withWas, input, walmart);
   it("rejects invalid AI structured content", () => {
-    expect(() => parseCopyDraft({ shortTitle: "Now $59", facebookBody: "Buy it" })).toThrow();
-    expect(() => parseCopyDraft({ shortTitle: "Good title", facebookBody: "https://wrong.link" })).toThrow();
+    expect(() => parseCopyDraft({ shortTitle: "Now $59" })).toThrow();
+    expect(() => parseCopyDraft({ shortTitle: "Good title https://wrong.link" })).toThrow();
+    expect(() => parseCopyDraft({ shortTitle: "Midi Dress perfect for beach outings" })).toThrow();
+    expect(() => parseCopyDraft({ shortTitle: "Good title", facebookBody: "Buy it" })).toThrow();
     expect(() => parseCopyDraft(JSON.parse("{}"))).toThrow();
   });
   it("rejects malformed Workers AI JSON", () => {
     expect(() => parseWorkersAIResponse({ response: "not json" })).toThrow();
   });
-  it("appends the exact original affiliate URL after the model body", async () => {
-    const content = await generateProductCopy(product, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set with Elsa", facebookBody: "Disney Toniebox Starter Set with Elsa is now $59.00, was $99.00." }) }, "#Ad");
-    expect(content.facebookPost.endsWith(input)).toBe(true);
+  it("builds the exact post from the title, source prices, and original affiliate URL", async () => {
+    const content = await generateProductCopy(product, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set with Elsa" }) }, "#Ad");
+    expect(content.facebookPost).toBe(`#Ad 🚨 Disney Toniebox Starter Set with Elsa is now $59.00, was $99.00.\n\n👉 ${input}`);
     expect(content.facebookPost).not.toContain(walmart);
+  });
+  it("omits the old price when the product has none", async () => {
+    const currentOnlyProduct = extractWalmartProduct(currentOnly, input, walmart);
+    const content = await generateProductCopy(currentOnlyProduct, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set" }) }, "#Ad");
+    expect(content.facebookPost).toBe(`#Ad 🚨 Disney Toniebox Starter Set is now $59.00.\n\n👉 ${input}`);
   });
   it("shrinks and clamps long titles in the controlled template", () => {
     const html = walmartCardHtml(product, { shortTitle: "Disney Toniebox Starter Set with Elsa and More Long Product Description Words", facebookPost: "" }, "data:image/png;base64,AAAA");
     expect(html).toContain("font-size:49px");
     expect(html).toContain("-webkit-line-clamp:3");
     expect(html).toContain("object-fit:contain");
+    expect(html).toContain("$59.00");
+    expect(html).toContain("$99.00");
   });
   it("hides an absent old price", () => {
     const html = walmartCardHtml({ ...product, oldPrice: undefined }, { shortTitle: "Disney Toniebox Starter Set", facebookPost: "" }, "data:image/png;base64,AAAA");
@@ -90,7 +99,7 @@ describe("copy and rendering", () => {
 
 describe("orchestration", () => {
   const renderer = { screenshot: vi.fn(async () => ({ bytes: new Uint8Array([137, 80, 78, 71]), mimeType: "image/png" as const })) };
-  const copyProvider = { generate: vi.fn(async () => ({ shortTitle: "Disney Toniebox Starter Set", facebookBody: "Disney Toniebox Starter Set is now $59.00, was $99.00." })) };
+  const copyProvider = { generate: vi.fn(async () => ({ shortTitle: "Disney Toniebox Starter Set" })) };
   it("rejects unsupported stores with no extraction or AI call", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response("html", { status: 200 }));
     await expect(processProductLink("https://example.org/p/1", { fetcher, dnsCheck: async () => {}, copyProvider, renderer, disclosure: "#Ad", requestId: "test" })).rejects.toMatchObject({ code: "UNSUPPORTED_STORE" });
