@@ -30,7 +30,8 @@ jobs:
             --config wrangler.jsonc --format=json | node -e '
             const { StringDecoder } = require("node:string_decoder");
             const allowed = new Set([
-              "queue_job_started", "redirect_resolved", "store_detected",
+              "webhook_accepted", "queue_send_failed", "queue_job_started",
+              "redirect_resolved", "store_detected",
               "walmart_extraction_diagnostics", "extraction_complete",
               "card_cache_disabled", "card_cache_lookup", "card_cache_miss",
               "card_cache_build_claimed", "card_cache_build_wait", "card_cache_hit",
@@ -39,7 +40,7 @@ jobs:
               "browser_render_attempt_failed", "browser_render_complete", "browser_render_failed",
               "card_cache_stored", "process_complete", "process_failed",
               "job_processing_failed", "telegram_photo_sent", "telegram_copy_sent",
-              "telegram_delivery_failed"
+              "telegram_delivery_failed", "telegram_error_message_failed"
             ]);
             const fields = [
               "requestId", "store", "hostname", "cacheStatus", "reason", "errorCode",
