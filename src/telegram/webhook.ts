@@ -5,6 +5,7 @@ import { BrowserScreenshotRenderer } from "../rendering/browser-renderer";
 import { processProductLink } from "../orchestration/process-product-link";
 import { TelegramApi } from "./api";
 import { workerFetch } from "../network/worker-fetch";
+import { D1R2CardCache, cardCacheTtlSeconds } from "../cache/card-cache";
 
 export type Env = {
   TELEGRAM_BOT_TOKEN: string;
@@ -14,6 +15,9 @@ export type Env = {
   AFFILIATE_DISCLOSURE: string;
   BROWSER: ConstructorParameters<typeof BrowserScreenshotRenderer>[0];
   PRODUCT_JOBS: Queue<TelegramJob>;
+  CARD_CACHE_DB?: D1Database;
+  CARD_CACHE_BUCKET?: R2Bucket;
+  CARD_CACHE_TTL_SECONDS?: string;
 };
 type TelegramUpdate = { message?: { text?: string; caption?: string; entities?: UrlEntity[]; caption_entities?: UrlEntity[]; chat?: { id?: number }; from?: { id?: number } } };
 export type TelegramJob = { chatId: number; telegramUserId?: number; inputUrl: string; requestId: string };
@@ -101,7 +105,10 @@ export async function processTelegramJob(job: TelegramJob, env: Env): Promise<vo
       renderer: new BrowserScreenshotRenderer(env.BROWSER),
       disclosure: env.AFFILIATE_DISCLOSURE || "#Ad",
       requestId,
-      telegramUserId
+      telegramUserId,
+      cardCache: env.CARD_CACHE_DB && env.CARD_CACHE_BUCKET
+        ? new D1R2CardCache(env.CARD_CACHE_DB, env.CARD_CACHE_BUCKET, cardCacheTtlSeconds(env.CARD_CACHE_TTL_SECONDS))
+        : undefined
     });
   } catch (error) {
     console.error(JSON.stringify({ event: "job_processing_failed", requestId, telegramUserId, errorStage: error instanceof ProductError ? error.stage : "unknown", errorCode: error instanceof ProductError ? error.code : "UNEXPECTED_ERROR", validationReason: error instanceof ProductError ? error.validationReason : undefined, ...(error instanceof ProductError ? error.browserDiagnostics : undefined) }));

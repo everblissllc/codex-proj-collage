@@ -14,9 +14,31 @@ URL validation allows only HTTP(S) public-looking hostnames and rejects URL cred
 
 ## Configuration
 
-`wrangler.jsonc` declares `BROWSER`, the `PRODUCT_JOBS` Queue binding, the Workers AI binding `AI`, `AI_TEXT_MODEL` (default `@cf/meta/llama-3.2-3b-instruct`), `AFFILIATE_DISCLOSURE` (default `#Ad`), and structured Workers logs. `WorkersAICopyProvider` implements the existing `CopyProvider` interface. It asks Workers AI only for a shortened `shortTitle` and validates the JSON and title, with at most one corrective inference for invalid output. Application code builds the Facebook post from that title, the exact extracted formatted price(s), the configured disclosure, and the original affiliate URL. Cloudflare's [JSON Mode support list](https://developers.cloudflare.com/workers-ai/features/json-mode/) does not include this 3B model, so the provider requests JSON in its prompt and validates the returned response. No KV, D1, or R2 storage is used.
+`wrangler.jsonc` declares `BROWSER`, the `PRODUCT_JOBS` Queue binding, the Workers AI binding `AI`, `AI_TEXT_MODEL` (default `@cf/meta/llama-3.2-3b-instruct`), `AFFILIATE_DISCLOSURE` (default `#Ad`), and structured Workers logs. `WorkersAICopyProvider` implements the existing `CopyProvider` interface. It asks Workers AI only for a shortened `shortTitle` and validates the JSON and title, with at most one corrective inference for invalid output. Application code builds the Facebook post from that title, the exact extracted formatted price(s), the configured disclosure, and the original affiliate URL. Cloudflare's [JSON Mode support list](https://developers.cloudflare.com/workers-ai/features/json-mode/) does not include this 3B model, so the provider requests JSON in its prompt and validates the returned response. No storage binding is required for the current uncached deployment.
 
 The smoke Queue permits one concurrent consumer invocation; production permits up to five. `max_concurrency` limits simultaneous jobs, not Browser Quick Actions requests per second. Jobs render immediately under normal conditions. Only a Browser HTTP 429 can cause one bounded retry: a valid integer `Retry-After` is honored within 500 ms–5 seconds, otherwise the delay is 1 second, with at most 250 ms jitter. A clear Browser usage-limit 429 is not retried. Cloudflare's [Browser Run Paid limits](https://developers.cloudflare.com/browser-run/limits/) remain account-wide; the queue setting does not guarantee capacity or prevent every 429.
+
+## Optional product-card cache (not provisioned)
+
+When both `CARD_CACHE_DB` (D1) and `CARD_CACHE_BUCKET` (R2) are bound, every job still resolves and extracts a fresh Walmart page. A SHA-256 key over the canonical product ID, authoritative formatted price state, hashed source title/image identity, and explicit cache/template/title versions selects reusable card state. Bump the constants in `src/cache/cache-key.ts` when the card design, rendering behavior, or AI title rules/model change. D1 stores the short title, build lease, timestamps, and opaque R2 key; R2 stores only the PNG. Neither store receives the affiliate link or complete Facebook post. A hit skips AI, image download, and Browser Run, then rebuilds the post from the fresh prices and this request's original link. The default TTL is 86,400 seconds (24 hours); `CARD_CACHE_TTL_SECONDS` can set 300–86,400 seconds. A build lease lasts 60 seconds. Another job polls for up to 12 seconds, then falls back to the uncached path if the builder is still active. Expiry and price/source/version changes cause misses without deleting old entries. Old R2 objects can be cleaned up later; cleanup is not needed for correct card selection.
+
+The cache remains disabled until separate resources are created and **both** bindings are added to the corresponding Wrangler file. The tracked migration is `migrations/0001_card_cache.sql`; apply it to each real D1 database before enabling bindings or deploying a cache-enabled Worker. Future provisioning commands, from an environment where Wrangler runs, are:
+
+```sh
+npx wrangler d1 create affiliate-deal-card-smoke-cache
+npx wrangler r2 bucket create affiliate-deal-card-smoke-cards
+npx wrangler d1 create affiliate-deal-card-cache
+npx wrangler r2 bucket create affiliate-deal-card-cards
+```
+
+Record each real D1 UUID and decline any prompt to edit Wrangler config automatically. Add `d1_databases` with `binding: CARD_CACHE_DB`, the matching database name and real `database_id`, plus `migrations_dir: migrations`; add `r2_buckets` with `binding: CARD_CACHE_BUCKET` and the matching bucket name. Use only the smoke resources in `wrangler.smoke.jsonc` and only the production resources in `wrangler.jsonc`. Optionally add `CARD_CACHE_TTL_SECONDS: "86400"` to each file's `vars`. Then apply migrations explicitly:
+
+```sh
+npx wrangler d1 migrations apply affiliate-deal-card-smoke-cache --remote --config wrangler.smoke.jsonc
+npx wrangler d1 migrations apply affiliate-deal-card-cache --remote --config wrangler.jsonc
+```
+
+No D1 or R2 resource has been created by this repository change. See Cloudflare's [D1 commands](https://developers.cloudflare.com/workers/wrangler/commands/d1/), [D1 binding configuration](https://developers.cloudflare.com/d1/get-started/), and [R2 bucket commands](https://developers.cloudflare.com/r2/reference/wrangler-commands/).
 
 Required secrets, never committed: `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`. Workers AI uses the `AI` binding and requires no separate AI API key. The Telegram webhook secret must use Telegram's permitted `A-Z`, `a-z`, `0-9`, `_`, `-` characters. For local development, copy `.dev.vars.example` to `.dev.vars` and replace placeholders. Browser Run local execution requires a remote binding; see [Cloudflare's Browser Run local development guidance](https://developers.cloudflare.com/browser-run/reference/wrangler/).
 

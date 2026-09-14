@@ -1,5 +1,6 @@
 import type { CopyProvider } from "./provider";
 import { ProductError, type GeneratedContent, type ProductData } from "../types";
+import { buildFacebookPost } from "./build-facebook-post";
 
 export type AiAttemptFailure = { attempt: number; errorCode: string; validationReason: string };
 export type GeneratedCopyResult = GeneratedContent & { attemptsUsed: number };
@@ -18,13 +19,9 @@ export async function generateProductCopy(product: ProductData, provider: CopyPr
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const draft = await provider.generate(product, correctionReason);
-      const safeDisclosure = disclosure.trim() || "#Ad";
-      const priceSentence = product.oldPrice
-        ? `is now ${product.currentPrice.formatted}, was ${product.oldPrice.formatted}.`
-        : `is now ${product.currentPrice.formatted}.`;
       return {
         shortTitle: draft.shortTitle,
-        facebookPost: `${safeDisclosure} 🚨 ${draft.shortTitle} ${priceSentence}\n\n👉 ${product.postUrl}`,
+        facebookPost: buildFacebookPost(product, draft.shortTitle, disclosure),
         attemptsUsed: attempt
       };
     } catch (error) {
