@@ -5,13 +5,21 @@
   "compatibility_date": "2026-09-12",
   "browser": { "binding": "BROWSER" },
   "ai": { "binding": "AI" },
+  "d1_databases": [{
+    "binding": "CARD_CACHE_DB",
+    "database_name": "affiliate-deal-card-cache",
+    "database_id": "3377ca82-425c-419e-b954-271c8e8fe058",
+    "migrations_dir": "migrations"
+  }],
+  "r2_buckets": [{ "binding": "CARD_CACHE_BUCKET", "bucket_name": "affiliate-deal-card-cards" }],
   "queues": {
     "producers": [{ "binding": "PRODUCT_JOBS", "queue": "affiliate-deal-card-jobs" }],
     "consumers": [{ "queue": "affiliate-deal-card-jobs", "max_batch_size": 1, "max_batch_timeout": 1, "max_concurrency": 5 }]
   },
   "vars": {
     "AI_TEXT_MODEL": "@cf/meta/llama-3.2-3b-instruct",
-    "AFFILIATE_DISCLOSURE": "#Ad"
+    "AFFILIATE_DISCLOSURE": "#Ad",
+    "CARD_CACHE_TTL_SECONDS": "86400"
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 }
 }
