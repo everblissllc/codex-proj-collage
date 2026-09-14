@@ -3,7 +3,7 @@ import { findProductUrl, validatePublicUrl, type UrlEntity } from "../stores/saf
 import { WorkersAICopyProvider } from "../ai/workers-ai-provider";
 import { BrowserScreenshotRenderer } from "../rendering/browser-renderer";
 import { processProductLink } from "../orchestration/process-product-link";
-import { TelegramApi } from "./api";
+import { TelegramApi, TelegramApiError } from "./api";
 import { workerFetch } from "../network/worker-fetch";
 import { D1R2CardCache, cardCacheTtlSeconds } from "../cache/card-cache";
 
@@ -80,22 +80,23 @@ export async function processTelegramJob(job: TelegramJob, env: Env): Promise<vo
   const { chatId, inputUrl, requestId, telegramUserId } = job;
   const telegram = new TelegramApi(env.TELEGRAM_BOT_TOKEN);
   console.log(JSON.stringify({ event: "queue_job_started", requestId, telegramUserId }));
-  const sendErrorMessage = async (error: unknown): Promise<void> => {
+  const deliveryDiagnostics = (error: unknown) => error instanceof TelegramApiError
+    ? { httpStatus: error.httpStatus, telegramErrorCode: error.telegramErrorCode, telegramDescriptionCategory: error.telegramDescriptionCategory }
+    : { telegramDescriptionCategory: "UNKNOWN" };
+  const sendErrorMessage = async (message: string): Promise<void> => {
     try {
-      await telegram.sendMessage(chatId, telegramErrorMessage(error));
-    } catch {
-      console.error(JSON.stringify({ event: "telegram_error_message_failed", requestId, telegramUserId, errorCode: "TELEGRAM_API_ERROR" }));
+      await telegram.sendMessage(chatId, message);
+    } catch (error) {
+      console.error(JSON.stringify({ event: "telegram_error_message_failed", requestId, operation: "send_error_message", errorCode: "TELEGRAM_API_ERROR", ...deliveryDiagnostics(error) }));
     }
   };
-  const logDeliveryFailure = (operation: string): void => {
-    console.error(JSON.stringify({ event: "telegram_delivery_failed", requestId, telegramUserId, operation, errorCode: "TELEGRAM_API_ERROR" }));
+  const logDeliveryFailure = (operation: "send_progress" | "send_photo" | "send_copy", error: unknown): void => {
+    console.error(JSON.stringify({ event: "telegram_delivery_failed", requestId, operation, errorCode: "TELEGRAM_API_ERROR", ...deliveryDiagnostics(error) }));
   };
   try {
     await telegram.sendMessage(chatId, "⏳ Creating your product card...");
   } catch (error) {
-    logDeliveryFailure("progress_message");
-    await sendErrorMessage(error);
-    return;
+    logDeliveryFailure("send_progress", error);
   }
   let result: Awaited<ReturnType<typeof processProductLink>>;
   try {
@@ -112,22 +113,22 @@ export async function processTelegramJob(job: TelegramJob, env: Env): Promise<vo
     });
   } catch (error) {
     console.error(JSON.stringify({ event: "job_processing_failed", requestId, telegramUserId, errorStage: error instanceof ProductError ? error.stage : "unknown", errorCode: error instanceof ProductError ? error.code : "UNEXPECTED_ERROR", validationReason: error instanceof ProductError ? error.validationReason : undefined, ...(error instanceof ProductError ? error.browserDiagnostics : undefined) }));
-    await sendErrorMessage(error);
+    await sendErrorMessage(telegramErrorMessage(error));
     return;
   }
   try {
     await telegram.sendPhoto(chatId, result.card);
     console.log(JSON.stringify({ event: "telegram_photo_sent", requestId, telegramUserId }));
   } catch (error) {
-    logDeliveryFailure("photo");
-    await sendErrorMessage(error);
+    logDeliveryFailure("send_photo", error);
+    await sendErrorMessage("Your card was created, but I couldn't send the image. Please try again.");
     return;
   }
   try {
     await telegram.sendMessage(chatId, `✅ Facebook post:\n\n${result.content.facebookPost}`);
     console.log(JSON.stringify({ event: "telegram_copy_sent", requestId, telegramUserId, success: true }));
   } catch (error) {
-    logDeliveryFailure("facebook_copy");
-    await sendErrorMessage(error);
+    logDeliveryFailure("send_copy", error);
+    await sendErrorMessage("Your card was sent, but I couldn't send the Facebook post text. Please try again.");
   }
 }

@@ -793,22 +793,92 @@ test("two Browser 429s send one generic Telegram failure without repeating upstr
     assert.ok(!JSON.stringify(errors).includes(input));
   } finally { global.fetch = originalFetch; console.error = originalError; console.warn = originalWarn; }
 });
-test("actual Telegram API failure logs telegram_delivery_failed, not job_processing_failed", async () => {
+async function runTelegramDeliveryCase(reply, requestId) {
   const originalFetch = global.fetch;
+  const originalLog = console.log;
   const originalError = console.error;
+  const logs = [];
   const errors = [];
-  let sendCalls = 0;
+  const sent = [];
+  const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
   try {
+    console.log = line => logs.push(JSON.parse(line));
     console.error = line => errors.push(JSON.parse(line));
-    global.fetch = async function (url) {
+    global.fetch = async function (url, init) {
       assert.equal(this, globalThis);
-      assert.match(String(url), /api\.telegram\.org/);
-      sendCalls++;
-      return sendCalls === 1 ? Response.json({ ok: false }, { status: 500 }) : Response.json({ ok: true });
+      const address = String(url);
+      if (address.startsWith("https://api.telegram.org/")) {
+        const method = address.split("/").at(-1);
+        const body = method === "sendMessage" ? JSON.parse(init.body) : undefined;
+        sent.push({ method, body });
+        return reply(method, body, sent.length);
+      }
+      if (address.startsWith("https://cloudflare-dns.com/")) return Response.json({ Status: 0, Answer: address.endsWith("type=A") ? [{ type: 1, data: "1.1.1.1" }] : [] });
+      if (address === input) return new Response(null, { status: 302, headers: { location: walmart } });
+      if (address === walmart) return new Response(withWas, { headers: { "content-type": "text/html" } });
+      if (address.includes("walmartimages.com")) return new Response(png, { headers: { "content-type": "image/png" } });
+      throw new Error("Unexpected fetch in Telegram delivery test");
     };
-    await processTelegramJob({ chatId: 123, inputUrl: input, requestId: "telegram-failure-test" }, { TELEGRAM_BOT_TOKEN: "test-token" });
-    assert.equal(sendCalls, 2);
-    assert.equal(errors.find(item => item.event === "telegram_delivery_failed").operation, "progress_message");
-    assert.ok(!errors.some(item => item.event === "job_processing_failed"));
-  } finally { global.fetch = originalFetch; console.error = originalError; }
+    const env = {
+      TELEGRAM_BOT_TOKEN: "test-token", AI_TEXT_MODEL: "@cf/meta/llama-3.2-3b-instruct",
+      AI: { run: async () => ({ response: JSON.stringify({ shortTitle: "Disney Toniebox Starter Set" }) }) },
+      AFFILIATE_DISCLOSURE: "#Ad",
+      BROWSER: { quickAction: async () => new Response(png, { headers: { "content-type": "image/png" } }) }
+    };
+    await processTelegramJob({ chatId: 123, inputUrl: input, requestId }, env);
+    return { sent, logs, errors };
+  } finally { global.fetch = originalFetch; console.log = originalLog; console.error = originalError; }
+}
+
+test("failed progress status is nonessential; photo and copy still deliver", async () => {
+  const { sent, logs, errors } = await runTelegramDeliveryCase((method, body, call) =>
+    call === 1 ? Response.json({ ok: false, error_code: 429, description: "Too Many Requests: retry after 1" }, { status: 429 }) : Response.json({ ok: true }), "progress-failure-test");
+  assert.deepEqual(sent.map(item => item.method), ["sendMessage", "sendPhoto", "sendMessage"]);
+  assert.equal(errors.find(item => item.event === "telegram_delivery_failed").operation, "send_progress");
+  assert.equal(errors.find(item => item.event === "telegram_delivery_failed").telegramDescriptionCategory, "RATE_LIMIT");
+  assert.equal(logs.find(item => item.event === "process_complete").success, true);
+  assert.ok(logs.some(item => item.event === "telegram_photo_sent"));
+  assert.ok(logs.some(item => item.event === "telegram_copy_sent"));
+  assert.ok(!errors.some(item => item.event === "job_processing_failed"));
+});
+
+test("photo delivery failure reports image delivery, not card creation", async () => {
+  const { sent, logs, errors } = await runTelegramDeliveryCase(method => method === "sendPhoto"
+    ? Response.json({ ok: false, error_code: 413, description: "Request Entity Too Large" }, { status: 413 })
+    : Response.json({ ok: true }), "photo-failure-test");
+  assert.deepEqual(sent.map(item => item.method), ["sendMessage", "sendPhoto", "sendMessage"]);
+  assert.equal(sent[2].body.text, "Your card was created, but I couldn't send the image. Please try again.");
+  assert.ok(logs.some(item => item.event === "process_complete" && item.success === true));
+  assert.ok(!logs.some(item => item.event === "telegram_copy_sent"));
+  const failure = errors.find(item => item.event === "telegram_delivery_failed");
+  assert.deepEqual({ operation: failure.operation, httpStatus: failure.httpStatus, telegramErrorCode: failure.telegramErrorCode, telegramDescriptionCategory: failure.telegramDescriptionCategory },
+    { operation: "send_photo", httpStatus: 413, telegramErrorCode: 413, telegramDescriptionCategory: "FILE_TOO_LARGE" });
+  assert.ok(!JSON.stringify(errors).includes(input));
+  assert.ok(!JSON.stringify(errors).includes("telegramUserId"));
+});
+
+test("copy delivery failure preserves sent photo and reports only copy failure", async () => {
+  const { sent, logs, errors } = await runTelegramDeliveryCase((method, body) => method === "sendMessage" && body.text.startsWith("✅ Facebook post:")
+    ? Response.json({ ok: false, error_code: 400, description: "Bad Request: message is too long" }, { status: 400 })
+    : Response.json({ ok: true }), "copy-failure-test");
+  assert.deepEqual(sent.map(item => item.method), ["sendMessage", "sendPhoto", "sendMessage", "sendMessage"]);
+  assert.equal(sent[3].body.text, "Your card was sent, but I couldn't send the Facebook post text. Please try again.");
+  assert.ok(logs.some(item => item.event === "telegram_photo_sent"));
+  assert.ok(!logs.some(item => item.event === "telegram_copy_sent"));
+  assert.ok(logs.some(item => item.event === "process_complete" && item.success === true));
+  const failure = errors.find(item => item.event === "telegram_delivery_failed");
+  assert.equal(failure.operation, "send_copy");
+  assert.equal(failure.httpStatus, 400);
+  assert.equal(failure.telegramErrorCode, 400);
+  assert.equal(failure.telegramDescriptionCategory, "MESSAGE_TOO_LONG");
+  assert.ok(!errors.some(item => item.event === "job_processing_failed"));
+  assert.ok(!JSON.stringify(errors).includes(input));
+});
+
+test("successful photo and copy delivery has no Telegram failure event", async () => {
+  const { sent, logs, errors } = await runTelegramDeliveryCase(() => Response.json({ ok: true }), "delivery-success-test");
+  assert.deepEqual(sent.map(item => item.method), ["sendMessage", "sendPhoto", "sendMessage"]);
+  assert.ok(logs.some(item => item.event === "telegram_photo_sent"));
+  assert.ok(logs.some(item => item.event === "telegram_copy_sent"));
+  assert.ok(!errors.some(item => item.event === "telegram_delivery_failed"));
 });

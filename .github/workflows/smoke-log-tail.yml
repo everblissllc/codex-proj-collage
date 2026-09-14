@@ -46,7 +46,8 @@ jobs:
               "validationReason", "attempt", "attemptsUsed", "browserStatus",
               "browserReason", "retryScheduled", "retryDelayMs", "waitDurationMs",
               "extractionDurationMs", "aiDurationMs", "renderDurationMs",
-              "browserDurationMs", "totalDurationMs", "success"
+              "browserDurationMs", "totalDurationMs", "success", "operation",
+              "httpStatus", "telegramErrorCode", "telegramDescriptionCategory"
             ];
             const asObject = (value) => {
               if (typeof value === "string") {
