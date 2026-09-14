@@ -12,13 +12,24 @@ const { normalizePrice } = src("stores/walmart/price.js");
 const { parseCopyDraft, parseWorkersAIResponse, WorkersAICopyProvider } = src("ai/workers-ai-provider.js");
 const { generateProductCopy } = src("ai/generate-product-copy.js");
 const { walmartCardHtml } = src("stores/walmart/template.js");
-const { BrowserScreenshotRenderer } = src("rendering/browser-renderer.js");
+const { BrowserScreenshotRenderer, browserRateLimitDelayMs } = src("rendering/browser-renderer.js");
 const { processProductLink } = src("orchestration/process-product-link.js");
 const { handleTelegramWebhook, processTelegramJob } = src("telegram/webhook.js");
 const withWas = readFileSync("test/fixtures/walmart-with-was.html", "utf8");
 const currentOnly = readFileSync("test/fixtures/walmart-current-only.html", "utf8");
 const input = "https://affiliate.example.org/go?id=abc";
 const walmart = "https://www.walmart.com/ip/123";
+
+test("production and smoke Queue consumers use installed Wrangler max_concurrency schema", () => {
+  const schema = JSON.parse(readFileSync("node_modules/wrangler/config-schema.json", "utf8"));
+  const consumerProperties = schema.definitions.RawConfig.properties.queues.properties.consumers.items.properties;
+  assert.deepEqual(consumerProperties.max_concurrency.type, ["number", "null"]);
+  for (const [file, queue, maxConcurrency] of [["wrangler.jsonc", "affiliate-deal-card-jobs", 5], ["wrangler.smoke.jsonc", "affiliate-deal-card-smoke-jobs", 1]]) {
+    const config = JSON.parse(readFileSync(file, "utf8"));
+    assert.deepEqual(config.queues.consumers, [{ queue, max_batch_size: 1, max_batch_timeout: 1, max_concurrency: maxConcurrency }]);
+    assert.equal(config.queues.producers[0].queue, queue);
+  }
+});
 
 test("Walmart URL detection and unsupported domain", () => {
   assert.equal(detectStore(walmart), "walmart");
@@ -329,7 +340,7 @@ test("Browser Run status maps to safe rate-limit and service reasons", async () 
     const originalError = console.error;
     try {
       console.error = () => {};
-      const renderer = new BrowserScreenshotRenderer({ quickAction: async () => new Response(null, { status }) });
+      const renderer = new BrowserScreenshotRenderer({ quickAction: async () => new Response(null, { status }) }, async () => {}, () => 0);
       await assert.rejects(renderer.screenshot("<main></main>", 1200, 1200), error => {
         assert.equal(error.code, "BROWSER_ERROR");
         assert.equal(error.browserDiagnostics.browserStatus, status);
@@ -338,6 +349,165 @@ test("Browser Run status maps to safe rate-limit and service reasons", async () 
       });
     } finally { console.error = originalError; }
   }
+});
+test("Browser success uses one Quick Action and reports attemptsUsed 1", async () => {
+  const originalLog = console.log;
+  const logs = [];
+  let calls = 0;
+  const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  try {
+    console.log = line => logs.push(JSON.parse(line));
+    const renderer = new BrowserScreenshotRenderer({ quickAction: async () => { calls++; return new Response(png); } }, async () => { throw Error("unexpected wait"); });
+    assert.deepEqual((await renderer.screenshot("<main></main>", 1200, 1200)).bytes, png);
+    assert.equal(calls, 1);
+    assert.equal(logs.find(item => item.event === "browser_render_complete").attemptsUsed, 1);
+  } finally { console.log = originalLog; }
+});
+test("one 429 retries the same HTML once and logs safe attempt metadata", async () => {
+  const originalLog = console.log;
+  const originalWarn = console.warn;
+  const logs = [];
+  const html = `<main><img src="data:image/png;base64,SECRET"><a href="${input}">product</a></main>`;
+  const calls = [];
+  const waits = [];
+  const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  try {
+    console.log = line => logs.push(JSON.parse(line));
+    console.warn = line => logs.push(JSON.parse(line));
+    const renderer = new BrowserScreenshotRenderer({ quickAction: async (action, options) => {
+      calls.push({ action, options });
+      return calls.length === 1
+        ? new Response(JSON.stringify({ errors: [{ message: "Quick Actions rate limit exceeded" }] }), { status: 429, statusText: "Too Many Requests", headers: { "content-type": "application/json", "Retry-After": "2", "x-browser-ms-used": "0" } })
+        : new Response(png);
+    } }, async ms => { waits.push(ms); }, () => 0);
+    assert.deepEqual((await renderer.screenshot(html, 1200, 1200, "retry-test")).bytes, png);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].action, "screenshot");
+    assert.deepEqual(calls[0].options, calls[1].options);
+    assert.equal(calls[0].options.html, html);
+    assert.deepEqual(waits, [2000]);
+    const failed = logs.find(item => item.event === "browser_render_attempt_failed");
+    assert.equal(failed.requestId, "retry-test");
+    assert.equal(failed.attempt, 1);
+    assert.equal(failed.browserStatus, 429);
+    assert.equal(failed.browserReason, "BROWSER_QUICK_ACTION_RATE_LIMIT");
+    assert.equal(failed.browserMsUsed, 0);
+    assert.equal(failed.retryScheduled, true);
+    assert.equal(failed.retryDelayMs, 2000);
+    assert.equal(logs.find(item => item.event === "browser_render_complete").attemptsUsed, 2);
+    assert.ok(!JSON.stringify(logs).includes(input));
+    assert.ok(!JSON.stringify(logs).includes("data:image"));
+    assert.ok(!JSON.stringify(logs).includes("SECRET"));
+  } finally { console.log = originalLog; console.warn = originalWarn; }
+});
+test("unknown 429 without Retry-After uses short Paid fallback and retries once", async () => {
+  const originalLog = console.log;
+  const originalWarn = console.warn;
+  const logs = [];
+  const waits = [];
+  let calls = 0;
+  const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  try {
+    console.log = line => logs.push(JSON.parse(line));
+    console.warn = line => logs.push(JSON.parse(line));
+    const renderer = new BrowserScreenshotRenderer({ quickAction: async () => {
+      calls++;
+      return calls === 1 ? new Response(null, { status: 429 }) : new Response(png);
+    } }, async ms => { waits.push(ms); }, () => 0);
+    assert.deepEqual((await renderer.screenshot("<main></main>", 1200, 1200)).bytes, png);
+    assert.equal(calls, 2);
+    assert.deepEqual(waits, [1000]);
+    assert.equal(logs.find(item => item.event === "browser_render_attempt_failed").browserReason, "BROWSER_RATE_LIMIT");
+    assert.equal(logs.find(item => item.event === "browser_render_complete").attemptsUsed, 2);
+  } finally { console.log = originalLog; console.warn = originalWarn; }
+});
+test("explicit Browser usage-limit 429 fails without retry or leaking response content", async () => {
+  const originalError = console.error;
+  const originalWarn = console.warn;
+  const logs = [];
+  let calls = 0;
+  const secret = "SECRET_BROWSER_BODY";
+  try {
+    console.error = line => logs.push(JSON.parse(line));
+    console.warn = line => logs.push(JSON.parse(line));
+    const renderer = new BrowserScreenshotRenderer({ quickAction: async () => {
+      calls++;
+      return new Response(JSON.stringify({ errors: [{ message: `Browser time limit exceeded for today ${secret} ${input} data:image/png;base64,PRIVATE` }] }), {
+        status: 429, headers: { "content-type": "application/json", "Retry-After": "5" }
+      });
+    } }, async () => { throw Error("unexpected wait"); });
+    await assert.rejects(renderer.screenshot(`<main>${secret} ${input}</main>`, 1200, 1200), error => {
+      assert.equal(error.code, "BROWSER_ERROR");
+      assert.equal(error.browserDiagnostics.browserReason, "BROWSER_USAGE_LIMIT");
+      return true;
+    });
+    assert.equal(calls, 1);
+    const attempt = logs.find(item => item.event === "browser_render_attempt_failed");
+    assert.equal(attempt.browserReason, "BROWSER_USAGE_LIMIT");
+    assert.equal(attempt.retryScheduled, false);
+    assert.equal(attempt.retryDelayMs, undefined);
+    assert.equal(logs.find(item => item.event === "browser_render_failed").browserReason, "BROWSER_USAGE_LIMIT");
+    assert.ok(!JSON.stringify(logs).includes(secret));
+    assert.ok(!JSON.stringify(logs).includes(input));
+    assert.ok(!JSON.stringify(logs).includes("data:image"));
+  } finally { console.error = originalError; console.warn = originalWarn; }
+});
+test("two 429 responses stop after two attempts with final rate-limit diagnostics", async () => {
+  const originalError = console.error;
+  const originalWarn = console.warn;
+  const logs = [];
+  let calls = 0;
+  const waits = [];
+  try {
+    console.error = line => logs.push(JSON.parse(line));
+    console.warn = line => logs.push(JSON.parse(line));
+    const renderer = new BrowserScreenshotRenderer({ quickAction: async () => {
+      calls++;
+      return new Response(JSON.stringify({ errors: [{ message: "Too many requests" }] }), { status: 429, statusText: "Too Many Requests", headers: { "content-type": "application/json", "Retry-After": "1", "x-browser-ms-used": String(calls) } });
+    } }, async ms => { waits.push(ms); }, () => 0);
+    await assert.rejects(renderer.screenshot("<main></main>", 1200, 1200), error => {
+      assert.equal(error.code, "BROWSER_ERROR");
+      assert.equal(error.browserDiagnostics.browserStatus, 429);
+      assert.equal(error.browserDiagnostics.browserReason, "BROWSER_QUICK_ACTION_RATE_LIMIT");
+      assert.equal(error.browserDiagnostics.browserMsUsed, 2);
+      return true;
+    });
+    assert.equal(calls, 2);
+    assert.deepEqual(waits, [1000]);
+    assert.deepEqual(logs.filter(item => item.event === "browser_render_attempt_failed").map(item => [item.attempt, item.retryScheduled]), [[1, true], [2, false]]);
+    assert.equal(logs.find(item => item.event === "browser_render_failed").browserReason, "BROWSER_QUICK_ACTION_RATE_LIMIT");
+  } finally { console.error = originalError; console.warn = originalWarn; }
+});
+test("only HTTP 429 retries; timeout, bad request, and malformed PNG do not", async () => {
+  const originalError = console.error;
+  const originalWarn = console.warn;
+  try {
+    console.error = () => {};
+    console.warn = () => {};
+    for (const [status, body, reason] of [[422, JSON.stringify({ errors: [{ message: "Navigation timeout" }] }), "BROWSER_TIMEOUT"], [400, null, "BROWSER_BAD_REQUEST"], [503, null, "BROWSER_SERVICE_UNAVAILABLE"]]) {
+      let calls = 0;
+      const renderer = new BrowserScreenshotRenderer({ quickAction: async () => {
+        calls++;
+        return new Response(body, { status, headers: body ? { "content-type": "application/json" } : undefined });
+      } }, async () => { throw Error("unexpected wait"); });
+      await assert.rejects(renderer.screenshot("<main></main>", 1200, 1200), error => error.browserDiagnostics.browserReason === reason);
+      assert.equal(calls, 1);
+    }
+    let calls = 0;
+    const renderer = new BrowserScreenshotRenderer({ quickAction: async () => { calls++; return new Response("not a PNG"); } }, async () => { throw Error("unexpected wait"); });
+    await assert.rejects(renderer.screenshot("<main></main>", 1200, 1200), { code: "BROWSER_BAD_IMAGE" });
+    assert.equal(calls, 1);
+  } finally { console.error = originalError; console.warn = originalWarn; }
+});
+test("Retry-After integer is bounded, malformed values fall back, and jitter stays small", () => {
+  assert.equal(browserRateLimitDelayMs("2", 0), 2000);
+  assert.equal(browserRateLimitDelayMs("0", 0), 500);
+  assert.equal(browserRateLimitDelayMs("999999", 0), 5000);
+  assert.equal(browserRateLimitDelayMs("999999999999999999999999999999", 0), 5000);
+  assert.equal(browserRateLimitDelayMs("not a number", 0), 1000);
+  assert.equal(browserRateLimitDelayMs(null, 0), 1000);
+  assert.equal(browserRateLimitDelayMs("2", 1), 2250);
+  assert.equal(browserRateLimitDelayMs("5", 1), 5000);
 });
 test("Cloudflare 422 timeout response still maps to BROWSER_TIMEOUT", async () => {
   const originalError = console.error;
@@ -578,6 +748,49 @@ test("AI job failure logs processing failure, then sends generic Telegram error 
     assert.equal(errors.find(item => item.event === "job_processing_failed").validationReason, "AI_BAD_JSON");
     assert.ok(!errors.some(item => item.event === "telegram_delivery_failed"));
     assert.ok(!JSON.stringify([...errors, ...warnings]).includes(input));
+  } finally { global.fetch = originalFetch; console.error = originalError; console.warn = originalWarn; }
+});
+test("two Browser 429s send one generic Telegram failure without repeating upstream work", async () => {
+  const originalFetch = global.fetch;
+  const originalError = console.error;
+  const originalWarn = console.warn;
+  const errors = [];
+  const sent = [];
+  const fetchCounts = { redirect: 0, page: 0, image: 0 };
+  let aiCalls = 0;
+  let browserCalls = 0;
+  const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  try {
+    console.error = line => errors.push(JSON.parse(line));
+    console.warn = () => {};
+    global.fetch = async function (url, init) {
+      assert.equal(this, globalThis);
+      const address = String(url);
+      if (address.startsWith("https://api.telegram.org/")) {
+        sent.push({ method: address.split("/").at(-1), body: JSON.parse(init.body) });
+        return Response.json({ ok: true });
+      }
+      if (address.startsWith("https://cloudflare-dns.com/")) return Response.json({ Status: 0, Answer: address.endsWith("type=A") ? [{ type: 1, data: "1.1.1.1" }] : [] });
+      if (address === input) { fetchCounts.redirect++; return new Response(null, { status: 302, headers: { location: walmart } }); }
+      if (address === walmart) { fetchCounts.page++; return new Response(withWas, { headers: { "content-type": "text/html" } }); }
+      if (address.includes("walmartimages.com")) { fetchCounts.image++; return new Response(png, { headers: { "content-type": "image/png" } }); }
+      throw new Error("Unexpected fetch in Browser rate-limit test");
+    };
+    const env = {
+      TELEGRAM_BOT_TOKEN: "test-token", AI_TEXT_MODEL: "@cf/meta/llama-3.2-3b-instruct",
+      AI: { run: async () => { aiCalls++; return { response: JSON.stringify({ shortTitle: "Disney Toniebox Starter Set" }) }; } },
+      AFFILIATE_DISCLOSURE: "#Ad",
+      BROWSER: { quickAction: async () => { browserCalls++; return new Response(null, { status: 429, headers: { "Retry-After": "0" } }); } }
+    };
+    await processTelegramJob({ chatId: 123, inputUrl: input, requestId: "browser-rate-limit-job" }, env);
+    assert.deepEqual(fetchCounts, { redirect: 1, page: 1, image: 1 });
+    assert.equal(aiCalls, 1);
+    assert.equal(browserCalls, 2);
+    assert.deepEqual(sent.map(item => item.method), ["sendMessage", "sendMessage"]);
+    assert.equal(sent[1].body.text, "I found the product but couldn't generate the image.");
+    assert.equal(errors.find(item => item.event === "job_processing_failed").browserReason, "BROWSER_RATE_LIMIT");
+    assert.ok(!errors.some(item => item.event === "telegram_delivery_failed"));
+    assert.ok(!JSON.stringify(errors).includes(input));
   } finally { global.fetch = originalFetch; console.error = originalError; console.warn = originalWarn; }
 });
 test("actual Telegram API failure logs telegram_delivery_failed, not job_processing_failed", async () => {

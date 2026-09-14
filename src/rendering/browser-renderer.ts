@@ -49,49 +49,91 @@ async function boundedErrorMessage(response: Response): Promise<string> {
 }
 
 function classifyBrowserError(status: number, message: string): string {
+  if (status === 429) {
+    if (/browser time limit exceeded for today|daily (?:browser |usage )?limit|(?:browser|account|monthly) (?:usage |browser )?quota|usage limit exceeded/i.test(message)) return "BROWSER_USAGE_LIMIT";
+    if (/quick actions?|requests? per second|too many requests|rate.?limit/i.test(message)) return "BROWSER_QUICK_ACTION_RATE_LIMIT";
+    return "BROWSER_RATE_LIMIT";
+  }
   if (/timed? out|timeout|deadline exceeded/i.test(message) || status === 408 || status === 504) return "BROWSER_TIMEOUT";
-  if (/rate.?limit|too many requests|quota exceeded/i.test(message) || status === 429) return "BROWSER_RATE_LIMIT";
+  if (/rate.?limit|too many requests|quota exceeded/i.test(message)) return "BROWSER_RATE_LIMIT";
   if (/unavailable|overloaded|capacity/i.test(message) || status === 502 || status === 503) return "BROWSER_SERVICE_UNAVAILABLE";
   if (/bad request|invalid (?:input|request|html)/i.test(message) || status === 400 || status === 413) return "BROWSER_BAD_REQUEST";
   return "BROWSER_UNKNOWN_ERROR";
 }
 
+const RATE_LIMIT_FALLBACK_MS = 1_000;
+const RATE_LIMIT_MAX_MS = 5_000;
+const RATE_LIMIT_MIN_MS = 500;
+const RATE_LIMIT_JITTER_MS = 250;
+
+export function browserRateLimitDelayMs(retryAfter: string | null, jitterUnit: number): number {
+  const seconds = retryAfter?.trim();
+  const parsed = seconds && /^\d+$/.test(seconds) ? Number(seconds) : undefined;
+  const base = parsed === undefined ? RATE_LIMIT_FALLBACK_MS
+    : !Number.isFinite(parsed) ? RATE_LIMIT_MAX_MS
+      : Math.min(RATE_LIMIT_MAX_MS, Math.max(RATE_LIMIT_MIN_MS, parsed * 1000));
+  const jitter = Number.isFinite(jitterUnit) ? Math.floor(Math.max(0, Math.min(1, jitterUnit)) * RATE_LIMIT_JITTER_MS) : 0;
+  return Math.min(RATE_LIMIT_MAX_MS, base + jitter);
+}
+
+const waitForRetry = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+
 export class BrowserScreenshotRenderer implements ScreenshotRenderer {
-  constructor(private readonly browser: BrowserRun) {}
+  constructor(
+    private readonly browser: BrowserRun,
+    private readonly wait: (ms: number) => Promise<void> = waitForRetry,
+    private readonly random: () => number = () => Math.random()
+  ) {}
 
   async screenshot(html: string, width: number, height: number, requestId?: string): Promise<CardImage> {
     const started = Date.now();
     try {
       const readySelector = '.card[data-card-ready="true"]';
-      const response = await this.browser.quickAction("screenshot", {
-        html,
-        viewport: { width, height },
-        screenshotOptions: { type: "png" },
-        gotoOptions: { waitUntil: "domcontentloaded", timeout: 8000 },
-        waitForSelector: { selector: readySelector, visible: true, timeout: 5000 },
-        selector: readySelector,
-        setJavaScriptEnabled: true,
-        actionTimeout: 8000,
-        bestAttempt: true
-      });
-      if (!response.ok) {
-        const message = await boundedErrorMessage(response).catch(() => "");
-        const diagnostics: BrowserDiagnostics = {
-          browserStatus: response.status,
-          browserStatusText: safeStatusText(response.statusText),
-          browserDurationMs: Date.now() - started,
-          browserMsUsed: browserMsUsed(response),
-          browserReason: classifyBrowserError(response.status, message)
-        };
-        throw new ProductError("BROWSER_ERROR", "render", `Browser Run returned HTTP ${response.status}`, undefined, diagnostics);
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const attemptStarted = Date.now();
+        const response = await this.browser.quickAction("screenshot", {
+          html,
+          viewport: { width, height },
+          screenshotOptions: { type: "png" },
+          gotoOptions: { waitUntil: "domcontentloaded", timeout: 8000 },
+          waitForSelector: { selector: readySelector, visible: true, timeout: 5000 },
+          selector: readySelector,
+          setJavaScriptEnabled: true,
+          actionTimeout: 8000,
+          bestAttempt: true
+        });
+        if (!response.ok) {
+          const message = await boundedErrorMessage(response).catch(() => "");
+          const diagnostics: BrowserDiagnostics = {
+            browserStatus: response.status,
+            browserStatusText: safeStatusText(response.statusText),
+            browserDurationMs: Date.now() - attemptStarted,
+            browserMsUsed: browserMsUsed(response),
+            browserReason: classifyBrowserError(response.status, message)
+          };
+          const retryScheduled = response.status === 429 && diagnostics.browserReason !== "BROWSER_USAGE_LIMIT" && attempt === 1;
+          const retryDelayMs = retryScheduled ? browserRateLimitDelayMs(response.headers.get("Retry-After"), this.random()) : undefined;
+          console.warn(JSON.stringify({
+            event: "browser_render_attempt_failed", requestId, attempt,
+            browserStatus: diagnostics.browserStatus, browserReason: diagnostics.browserReason,
+            browserDurationMs: diagnostics.browserDurationMs, browserMsUsed: diagnostics.browserMsUsed,
+            retryScheduled, retryDelayMs
+          }));
+          if (retryScheduled && retryDelayMs !== undefined) {
+            await this.wait(retryDelayMs);
+            continue;
+          }
+          throw new ProductError("BROWSER_ERROR", "render", `Browser Run returned HTTP ${response.status}`, undefined, diagnostics);
+        }
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (bytes.length > 10_000_000) throw new ProductError("IMAGE_TOO_LARGE", "render", "Rendered card exceeds Telegram photo limit");
+        if (bytes.length < 8 || bytes[0] !== 137 || bytes[1] !== 80 || bytes[2] !== 78 || bytes[3] !== 71) {
+          throw new ProductError("BROWSER_BAD_IMAGE", "render", "Browser Run did not return a PNG");
+        }
+        console.log(JSON.stringify({ event: "browser_render_complete", requestId, browserDurationMs: Date.now() - started, browserMsUsed: browserMsUsed(response), outputBytes: bytes.length, mimeType: "image/png", attemptsUsed: attempt }));
+        return { bytes, mimeType: "image/png" };
       }
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (bytes.length > 10_000_000) throw new ProductError("IMAGE_TOO_LARGE", "render", "Rendered card exceeds Telegram photo limit");
-      if (bytes.length < 8 || bytes[0] !== 137 || bytes[1] !== 80 || bytes[2] !== 78 || bytes[3] !== 71) {
-        throw new ProductError("BROWSER_BAD_IMAGE", "render", "Browser Run did not return a PNG");
-      }
-      console.log(JSON.stringify({ event: "browser_render_complete", requestId, browserDurationMs: Date.now() - started, browserMsUsed: browserMsUsed(response), outputBytes: bytes.length, mimeType: "image/png" }));
-      return { bytes, mimeType: "image/png" };
+      throw new ProductError("BROWSER_ERROR", "render", "Browser Run retry exhausted");
     } catch (error) {
       const diagnostics = error instanceof ProductError ? error.browserDiagnostics : undefined;
       console.error(JSON.stringify({
