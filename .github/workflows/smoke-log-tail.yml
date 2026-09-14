@@ -28,7 +28,7 @@ jobs:
           set +e
           timeout 180s npx wrangler tail affiliate-deal-card-smoke \
             --config wrangler.smoke.jsonc --format=json | node -e '
-            const readline = require("node:readline");
+            const { StringDecoder } = require("node:string_decoder");
             const allowed = new Set([
               "queue_job_started", "redirect_resolved", "store_detected",
               "walmart_extraction_diagnostics", "extraction_complete",
@@ -68,19 +68,23 @@ jobs:
               return true;
             };
             let shapePrinted = false;
-            readline.createInterface({ input: process.stdin }).on("line", (line) => {
-              const trace = asObject(line);
-              if (!trace) return;
+            let totalBytesReceived = 0;
+            let totalCompleteJsonValues = 0;
+            let parseFailureCount = 0;
+            const safeKeys = (object) => Object.keys(object).slice(0, 20).map((key) =>
+              /^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(key) ? key : "[other]"
+            );
+            const processTrace = (trace) => {
               const logs = Array.isArray(trace.logs) ? trace.logs : [];
               if (!shapePrinted) {
                 const firstLog = asObject(logs[0]);
                 const message = firstLog?.message;
                 const elements = Array.isArray(message) ? message : message === undefined ? [] : [message];
-                const topLevelKeys = Object.keys(trace).slice(0, 20).map((key) =>
-                  /^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(key) ? key : "[other]"
-                );
                 process.stdout.write(JSON.stringify({
-                  event: "smoke_tail_shape", topLevelKeys, hasLogs: Array.isArray(trace.logs),
+                  event: "smoke_tail_shape", topLevelKeys: safeKeys(trace),
+                  hasLogs: Array.isArray(trace.logs),
+                  logsType: Array.isArray(trace.logs) ? "array" : typeof trace.logs,
+                  firstLogKeys: firstLog ? safeKeys(firstLog) : [],
                   logMessageType: Array.isArray(message) ? "array" : typeof message,
                   messageElementTypes: [...new Set(elements.map((item) => item === null ? "null" : typeof item))]
                 }) + "\n");
@@ -92,6 +96,72 @@ jobs:
                 if (!log || emit(log)) continue;
                 const messages = Array.isArray(log.message) ? log.message : [log.message];
                 for (const message of messages) emit(message);
+              }
+            };
+            const decoder = new StringDecoder("utf8");
+            const maxRecordChars = 8 * 1024 * 1024;
+            let record = "";
+            let depth = 0;
+            let inString = false;
+            let escaped = false;
+            let oversized = false;
+            const append = (part) => {
+              if (oversized) return;
+              if (record.length + part.length > maxRecordChars) {
+                record = "";
+                oversized = true;
+              } else {
+                record += part;
+              }
+            };
+            const scan = (text) => {
+              let segmentStart = depth > 0 ? 0 : -1;
+              for (let i = 0; i < text.length; i++) {
+                const char = text[i];
+                if (depth === 0) {
+                  if (char !== "{") continue;
+                  depth = 1;
+                  segmentStart = i;
+                  inString = false;
+                  escaped = false;
+                  oversized = false;
+                  continue;
+                }
+                if (inString) {
+                  if (escaped) escaped = false;
+                  else if (char === "\\") escaped = true;
+                  else if (char === "\"") inString = false;
+                } else if (char === "\"") inString = true;
+                else if (char === "{" || char === "[") depth++;
+                else if (char === "}" || char === "]") depth--;
+                if (depth === 0) {
+                  append(text.slice(segmentStart, i + 1));
+                  if (oversized) parseFailureCount++;
+                  else {
+                    try {
+                      const trace = JSON.parse(record);
+                      totalCompleteJsonValues++;
+                      if (trace && typeof trace === "object" && !Array.isArray(trace)) processTrace(trace);
+                    } catch { parseFailureCount++; }
+                  }
+                  record = "";
+                  segmentStart = -1;
+                }
+              }
+              if (depth > 0) append(text.slice(segmentStart));
+            };
+            process.stdin.on("data", (chunk) => {
+              totalBytesReceived += chunk.length;
+              scan(decoder.write(chunk));
+            });
+            process.stdin.on("end", () => {
+              scan(decoder.end());
+              if (depth > 0) parseFailureCount++;
+              if (totalCompleteJsonValues === 0) {
+                process.stdout.write(JSON.stringify({
+                  event: "smoke_tail_stream_diagnostic", totalBytesReceived,
+                  totalCompleteJsonValues, parseFailureCount
+                }) + "\n");
               }
             });
           '
