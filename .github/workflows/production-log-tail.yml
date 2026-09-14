@@ -76,8 +76,32 @@ jobs:
             const safeKeys = (object) => Object.keys(object).slice(0, 20).map((key) =>
               /^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(key) ? key : "[other]"
             );
+            const safeIngress = (trace) => {
+              const trigger = asObject(trace.event);
+              const request = asObject(trigger?.request) ?? asObject(trace.request);
+              const response = asObject(trigger?.response) ?? asObject(trace.response);
+              const outcome = typeof trace.outcome === "string" && /^[A-Za-z_]{1,30}$/.test(trace.outcome)
+                ? trace.outcome : undefined;
+              const rawType = trace.eventType ?? trigger?.type;
+              const eventType = typeof rawType === "string" && /^(fetch|queue|scheduled|alarm|tail|email)$/.test(rawType)
+                ? rawType : request ? "fetch" : undefined;
+              const method = typeof request?.method === "string" && /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/.test(request.method)
+                ? request.method : undefined;
+              let pathname;
+              if (typeof request?.url === "string") {
+                try {
+                  const path = new URL(request.url).pathname;
+                  pathname = ["/telegram/webhook", "/health", "/"].includes(path) ? path : "[other]";
+                } catch { pathname = undefined; }
+              }
+              const rawStatus = response?.status ?? trace.httpStatus;
+              const httpStatus = Number.isInteger(rawStatus) && rawStatus >= 100 && rawStatus <= 599
+                ? rawStatus : undefined;
+              return { outcome, eventType, method, pathname, httpStatus };
+            };
             const processTrace = (trace) => {
               const logs = Array.isArray(trace.logs) ? trace.logs : [];
+              const ingress = safeIngress(trace);
               if (!shapePrinted) {
                 const firstLog = asObject(logs[0]);
                 const message = firstLog?.message;
@@ -88,10 +112,12 @@ jobs:
                   logsType: Array.isArray(trace.logs) ? "array" : typeof trace.logs,
                   firstLogKeys: firstLog ? safeKeys(firstLog) : [],
                   logMessageType: Array.isArray(message) ? "array" : typeof message,
-                  messageElementTypes: [...new Set(elements.map((item) => item === null ? "null" : typeof item))]
+                  messageElementTypes: [...new Set(elements.map((item) => item === null ? "null" : typeof item))],
+                  ...ingress
                 }) + "\n");
                 shapePrinted = true;
               }
+              process.stdout.write(JSON.stringify({ event: "production_tail_ingress", ...ingress }) + "\n");
               if (emit(trace)) return;
               for (const rawLog of logs) {
                 const log = asObject(rawLog);
