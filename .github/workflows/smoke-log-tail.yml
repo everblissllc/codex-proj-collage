@@ -48,24 +48,50 @@ jobs:
               "extractionDurationMs", "aiDurationMs", "renderDurationMs",
               "browserDurationMs", "totalDurationMs", "success"
             ];
-            readline.createInterface({ input: process.stdin }).on("line", (line) => {
-              let trace;
-              try { trace = JSON.parse(line); } catch { return; }
-              for (const log of trace.logs ?? []) {
-                for (const message of Array.isArray(log.message) ? log.message : [log.message]) {
-                  if (typeof message !== "string") continue;
-                  let entry;
-                  try { entry = JSON.parse(message); } catch { continue; }
-                  if (!entry || !allowed.has(entry.event)) continue;
-                  const safe = { event: entry.event };
-                  for (const field of fields) {
-                    const value = entry[field];
-                    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-                      safe[field] = value;
-                    }
-                  }
-                  process.stdout.write(JSON.stringify(safe) + "\n");
+            const asObject = (value) => {
+              if (typeof value === "string") {
+                try { value = JSON.parse(value); } catch { return null; }
+              }
+              return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+            };
+            const emit = (value) => {
+              const entry = asObject(value);
+              if (!entry || !allowed.has(entry.event)) return false;
+              const safe = { event: entry.event };
+              for (const field of fields) {
+                const value = entry[field];
+                if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+                  safe[field] = value;
                 }
+              }
+              process.stdout.write(JSON.stringify(safe) + "\n");
+              return true;
+            };
+            let shapePrinted = false;
+            readline.createInterface({ input: process.stdin }).on("line", (line) => {
+              const trace = asObject(line);
+              if (!trace) return;
+              const logs = Array.isArray(trace.logs) ? trace.logs : [];
+              if (!shapePrinted) {
+                const firstLog = asObject(logs[0]);
+                const message = firstLog?.message;
+                const elements = Array.isArray(message) ? message : message === undefined ? [] : [message];
+                const topLevelKeys = Object.keys(trace).slice(0, 20).map((key) =>
+                  /^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(key) ? key : "[other]"
+                );
+                process.stdout.write(JSON.stringify({
+                  event: "smoke_tail_shape", topLevelKeys, hasLogs: Array.isArray(trace.logs),
+                  logMessageType: Array.isArray(message) ? "array" : typeof message,
+                  messageElementTypes: [...new Set(elements.map((item) => item === null ? "null" : typeof item))]
+                }) + "\n");
+                shapePrinted = true;
+              }
+              if (emit(trace)) return;
+              for (const rawLog of logs) {
+                const log = asObject(rawLog);
+                if (!log || emit(log)) continue;
+                const messages = Array.isArray(log.message) ? log.message : [log.message];
+                for (const message of messages) emit(message);
               }
             });
           '
