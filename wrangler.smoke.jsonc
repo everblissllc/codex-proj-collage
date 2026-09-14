@@ -6,13 +6,21 @@
   "workers_dev": true,
   "browser": { "binding": "BROWSER" },
   "ai": { "binding": "AI" },
+  "d1_databases": [{
+    "binding": "CARD_CACHE_DB",
+    "database_name": "affiliate-deal-card-smoke-cache",
+    "database_id": "f8901896-a174-43d2-9e0a-4762f665aaf7",
+    "migrations_dir": "migrations"
+  }],
+  "r2_buckets": [{ "binding": "CARD_CACHE_BUCKET", "bucket_name": "affiliate-deal-card-smoke-cards" }],
   "queues": {
     "producers": [{ "binding": "PRODUCT_JOBS", "queue": "affiliate-deal-card-smoke-jobs" }],
     "consumers": [{ "queue": "affiliate-deal-card-smoke-jobs", "max_batch_size": 1, "max_batch_timeout": 1, "max_concurrency": 1 }]
   },
   "vars": {
     "AI_TEXT_MODEL": "@cf/meta/llama-3.2-3b-instruct",
-    "AFFILIATE_DISCLOSURE": "#Ad"
+    "AFFILIATE_DISCLOSURE": "#Ad",
+    "CARD_CACHE_TTL_SECONDS": "86400"
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 }
 }
