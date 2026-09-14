@@ -1,0 +1,88 @@
+name: Deploy production Worker
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: affiliate-deal-card-production
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: git diff --check
+      - name: Validate production config and target
+        run: |
+          node --input-type=module -e '
+            import assert from "node:assert/strict";
+            import { readFileSync } from "node:fs";
+            const config = JSON.parse(readFileSync("wrangler.jsonc", "utf8"));
+            assert.equal(config.name, "affiliate-deal-card-bot");
+            assert.equal(config.main, "src/index.ts");
+            assert.deepEqual(config.browser, { binding: "BROWSER" });
+            assert.deepEqual(config.ai, { binding: "AI" });
+            assert.deepEqual(config.d1_databases, [{
+              binding: "CARD_CACHE_DB",
+              database_name: "affiliate-deal-card-cache",
+              database_id: "3377ca82-425c-419e-b954-271c8e8fe058",
+              migrations_dir: "migrations"
+            }]);
+            assert.deepEqual(config.r2_buckets, [{
+              binding: "CARD_CACHE_BUCKET", bucket_name: "affiliate-deal-card-cards"
+            }]);
+            assert.deepEqual(config.queues, {
+              producers: [{ binding: "PRODUCT_JOBS", queue: "affiliate-deal-card-jobs" }],
+              consumers: [{ queue: "affiliate-deal-card-jobs", max_batch_size: 1,
+                max_batch_timeout: 1, max_concurrency: 5 }]
+            });
+            assert.equal(config.vars.AI_TEXT_MODEL, "@cf/meta/llama-3.2-3b-instruct");
+            assert.equal(config.vars.AFFILIATE_DISCLOSURE, "#Ad");
+            assert.equal(config.vars.CARD_CACHE_TTL_SECONDS, "86400");
+            console.log("Production Worker config validated.");
+          '
+      - run: npx wrangler deploy --dry-run --config wrangler.jsonc
+
+  deploy-production:
+    needs: verify
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Show production deployment target
+        run: |
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const config = JSON.parse(readFileSync("wrangler.jsonc", "utf8"));
+            console.log(`Worker: ${config.name}`);
+            console.log("Config: wrangler.jsonc");
+            console.log(`Branch: ${process.env.GITHUB_REF_NAME}`);
+            console.log(`Commit: ${process.env.GITHUB_SHA}`);
+          '
+      - name: Deploy production Worker
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [[ -z "$CLOUDFLARE_ACCOUNT_ID" || -z "$CLOUDFLARE_API_TOKEN" ]]; then
+            echo "Production Cloudflare credentials are missing."
+            exit 1
+          fi
+          npx wrangler deploy --config wrangler.jsonc
