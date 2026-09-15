@@ -1,0 +1,7 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "affiliate-deal-card-bubble-pilot",
+  "main": "pilot/bubble-browser-worker.ts",
+  "compatibility_date": "2026-09-12",
+  "browser": { "binding": "BROWSER" }
+}

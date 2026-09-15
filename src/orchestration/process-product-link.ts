@@ -88,7 +88,7 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
     store = detectStore(page.resolvedUrl);
     console.log(JSON.stringify({ event: "store_detected", ...base, hostname, store: store ?? "unsupported" }));
     const adapter = store ? screenshotStore(store) : undefined;
-    if (directStore === "elf" && store !== "elf") {
+    if (directStore && screenshotStore(directStore) && store !== directStore) {
       await page.response.body?.cancel();
       throw new ProductError("UNSAFE_SCREENSHOT_URL", "url", "Cross-store screenshot redirect rejected");
     }

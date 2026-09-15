@@ -1,4 +1,4 @@
-export type StoreId = "walmart" | "elf" | "amazon" | "target" | "homedepot";
+export type StoreId = "walmart" | "elf" | "bubble" | "amazon" | "target" | "homedepot";
 export type Price = { value: number; formatted: string; currency: string };
 export type ProductData = {
   store: StoreId;
