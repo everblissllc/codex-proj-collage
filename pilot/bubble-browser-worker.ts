@@ -1,6 +1,7 @@
 import { BrowserMobilePageRenderer } from "../src/rendering/mobile-page-renderer";
-import { bubbleAdapter, bubblePriceSelection } from "../src/stores/screenshot/bubble";
-import { readLimitedTextWithSize, resolveUrl } from "../src/stores/resolve-url";
+import { BrowserRunPageProductExtractor } from "../src/rendering/browser-page-extractor";
+import { bubbleAdapter } from "../src/stores/screenshot/bubble";
+import { resolveUrl } from "../src/stores/resolve-url";
 import { validatePublicUrl } from "../src/stores/safe-url";
 import { ProductError, type ProductData } from "../src/types";
 
@@ -10,7 +11,7 @@ const SALE_URL = "https://hellobubble.com/products/american-eagle-x-bubble-boxy-
 const REGULAR_URL = "https://hellobubble.com/products/water-slide";
 const PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10];
 
-async function fetchAndExtract(url: string, diagnostics: FetchDiagnostics): Promise<{ product: ProductData; selection?: string }> {
+async function resolveForBrowser(url: string, diagnostics: FetchDiagnostics): Promise<string> {
   validatePublicUrl(url);
   const page = await resolveUrl(url);
   diagnostics.httpStatus = page.response.status;
@@ -19,11 +20,8 @@ async function fetchAndExtract(url: string, diagnostics: FetchDiagnostics): Prom
   diagnostics.redirectCount = page.redirectCount;
   const length = page.response.headers.get("content-length");
   if (length && /^\d+$/.test(length)) diagnostics.responseByteLength = Number(length);
-  const { text, byteLength } = await readLimitedTextWithSize(page.response);
-  diagnostics.responseByteLength = byteLength;
-  const product = bubbleAdapter.extract(text, url, page.resolvedUrl);
-  diagnostics.extractionSucceeded = true;
-  return { product, selection: bubblePriceSelection(text, page.resolvedUrl) };
+  await page.response.body?.cancel();
+  return page.resolvedUrl;
 }
 
 export default {
@@ -36,24 +34,29 @@ export default {
     const saleFetch: FetchDiagnostics = { extractionSucceeded: false };
     const regularFetch: FetchDiagnostics = { extractionSucceeded: false };
     try {
-      const sale = await fetchAndExtract(SALE_URL, saleFetch);
+      const browserExtractor = new BrowserRunPageProductExtractor(env.BROWSER);
+      const saleTarget = await resolveForBrowser(SALE_URL, saleFetch);
+      const sale = await browserExtractor.extractProductPage(saleTarget, SALE_URL, bubbleAdapter, crypto.randomUUID());
+      saleFetch.extractionSucceeded = true;
       if (!sale.product.oldPrice || sale.product.oldPrice.value <= sale.product.currentPrice.value) {
         throw new ProductError("PILOT_SALE_PRICE_INVALID", "extraction", "Live Bubble sale did not expose a higher compare-at price");
       }
-      const regular = await fetchAndExtract(REGULAR_URL, regularFetch);
+      const regularTarget = await resolveForBrowser(REGULAR_URL, regularFetch);
+      const regular = await browserExtractor.extractProductPage(regularTarget, REGULAR_URL, bubbleAdapter, crypto.randomUUID());
+      regularFetch.extractionSucceeded = true;
       console.log(JSON.stringify({
         event: "bubble_pilot_extraction_complete", store: "bubble",
         saleFetch, regularFetch,
         saleCurrentPrice: sale.product.currentPrice.formatted,
         saleOldPrice: sale.product.oldPrice.formatted,
-        saleVariantSelection: sale.selection,
+        saleVariantSelection: sale.diagnostics.variantSelection,
         saleHasExplicitVariant: false,
         regularCurrentPrice: regular.product.currentPrice.formatted,
         regularOldPricePresent: Boolean(regular.product.oldPrice),
         success: true
       }));
 
-      const card = await new BrowserMobilePageRenderer(env.BROWSER).screenshotProductPage(sale.product.resolvedUrl, bubbleAdapter, crypto.randomUUID());
+      const card = await new BrowserMobilePageRenderer(env.BROWSER).screenshotProductPage(saleTarget, bubbleAdapter, crypto.randomUUID());
       if (card.bytes.length < 24 || !PNG_SIGNATURE.every((byte, index) => card.bytes[index] === byte)) {
         throw new ProductError("BROWSER_BAD_IMAGE", "render", "Bubble pilot did not receive a complete PNG");
       }
@@ -72,7 +75,7 @@ export default {
         "x-pilot-sale-redirect-count": String(saleFetch.redirectCount ?? 0),
         "x-pilot-sale-current-price": sale.product.currentPrice.formatted,
         "x-pilot-sale-old-price": sale.product.oldPrice.formatted,
-        "x-pilot-variant-selection": sale.selection ?? "unknown",
+        "x-pilot-variant-selection": String(sale.diagnostics.variantSelection ?? "unknown"),
         "x-pilot-regular-http-status": String(regularFetch.httpStatus),
         "x-pilot-regular-current-price": regular.product.currentPrice.formatted,
         "x-pilot-width": String(width), "x-pilot-height": String(height), "x-pilot-bytes": String(card.bytes.length)

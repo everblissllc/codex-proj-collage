@@ -3,6 +3,7 @@ import { findProductUrl, validatePublicUrl, type UrlEntity } from "../stores/saf
 import { WorkersAICopyProvider } from "../ai/workers-ai-provider";
 import { BrowserScreenshotRenderer } from "../rendering/browser-renderer";
 import { BrowserMobilePageRenderer } from "../rendering/mobile-page-renderer";
+import { BrowserRunPageProductExtractor } from "../rendering/browser-page-extractor";
 import { processProductLink } from "../orchestration/process-product-link";
 import { TelegramApi, TelegramApiError } from "./api";
 import { workerFetch } from "../network/worker-fetch";
@@ -106,6 +107,7 @@ export async function processTelegramJob(job: TelegramJob, env: Env): Promise<vo
       copyProvider: new WorkersAICopyProvider(env.AI, env.AI_TEXT_MODEL),
       renderer: new BrowserScreenshotRenderer(env.BROWSER),
       pageRenderer: new BrowserMobilePageRenderer(env.BROWSER),
+      pageExtractor: new BrowserRunPageProductExtractor(env.BROWSER),
       disclosure: env.AFFILIATE_DISCLOSURE || "#Ad",
       requestId,
       telegramUserId,

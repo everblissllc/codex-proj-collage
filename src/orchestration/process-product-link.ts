@@ -15,8 +15,9 @@ import type { CardCache, CacheIdentity, CacheLookup } from "../cache/types";
 import { screenshotStore } from "../stores/screenshot/registry";
 import { processScreenshotStore } from "./process-screenshot-store";
 import type { MobilePageScreenshotRenderer } from "../rendering/mobile-page-renderer";
+import type { BrowserPageProductExtractor } from "../rendering/browser-page-extractor";
 
-export type ProcessDeps = { fetcher: FetchLike; copyProvider: CopyProvider; renderer: ScreenshotRenderer; pageRenderer?: MobilePageScreenshotRenderer; disclosure: string; requestId: string; telegramUserId?: number; dnsCheck?: DnsCheck; cardCache?: CardCache };
+export type ProcessDeps = { fetcher: FetchLike; copyProvider: CopyProvider; renderer: ScreenshotRenderer; pageRenderer?: MobilePageScreenshotRenderer; pageExtractor?: BrowserPageProductExtractor; disclosure: string; requestId: string; telegramUserId?: number; dnsCheck?: DnsCheck; cardCache?: CardCache };
 export type ProcessResult = { product: ProductData; content: GeneratedContent; card: CardImage };
 
 type CacheDecision = { kind: "hit"; result: Extract<CacheLookup, { kind: "hit" }> } | { kind: "claimed"; token: string } | { kind: "bypass" };
@@ -93,12 +94,21 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
       throw new ProductError("UNSAFE_SCREENSHOT_URL", "url", "Cross-store screenshot redirect rejected");
     }
     if (adapter) {
-      const { text: html, byteLength: responseByteLength } = await readLimitedTextWithSize(page.response);
-      const diagnostics = adapter.inspect(html);
       const mimeHeader = page.response.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
       const contentType = mimeHeader && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(mimeHeader) ? mimeHeader : "unknown";
-      console.log(JSON.stringify({ event: `${store}_extraction_diagnostics`, ...base, hostname, httpStatus: page.response.status, contentType, responseByteLength, redirectCount: page.redirectCount, ...diagnostics }));
-      const product = adapter.extract(html, inputUrl, page.resolvedUrl);
+      let product: ProductData;
+      if (adapter.extractionMode === "browser-page") {
+        const responseByteLength = /^\d+$/.test(page.response.headers.get("content-length") ?? "") ? Number(page.response.headers.get("content-length")) : undefined;
+        console.log(JSON.stringify({ event: `${store}_extraction_diagnostics`, ...base, hostname, httpStatus: page.response.status, contentType, responseByteLength, redirectCount: page.redirectCount, extractionMode: "browser-page", workerFetchBlocked: page.response.status === 403 }));
+        await page.response.body?.cancel();
+        if (!deps.pageExtractor) throw new ProductError("BROWSER_EXTRACTION_UNAVAILABLE", "extraction", "Browser page extractor unavailable");
+        product = (await deps.pageExtractor.extractProductPage(page.resolvedUrl, inputUrl, adapter, deps.requestId)).product;
+      } else {
+        const { text: html, byteLength: responseByteLength } = await readLimitedTextWithSize(page.response);
+        const diagnostics = adapter.inspect(html);
+        console.log(JSON.stringify({ event: `${store}_extraction_diagnostics`, ...base, hostname, httpStatus: page.response.status, contentType, responseByteLength, redirectCount: page.redirectCount, ...diagnostics }));
+        product = adapter.extract(html, inputUrl, page.resolvedUrl);
+      }
       extractionDurationMs = Date.now() - extractionStart;
       console.log(JSON.stringify({ event: "extraction_complete", ...base, store, hostname, extractionDurationMs }));
       console.log(JSON.stringify({ event: "card_cache_disabled", ...base, store, reason: "SCREENSHOT_STORE_CACHE_DISABLED" }));

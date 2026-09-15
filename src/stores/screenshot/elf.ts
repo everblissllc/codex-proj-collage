@@ -79,6 +79,7 @@ export function extractElfProduct(html: string, inputUrl: string, resolvedUrl: s
 
 export const elfAdapter: ScreenshotStoreAdapter = {
   store: "elf",
+  extractionMode: "worker-html",
   allowsHost: hostname => hostname === "elfcosmetics.com" || hostname.endsWith(".elfcosmetics.com"),
   extract: extractElfProduct,
   inspect: inspectElfHtml,

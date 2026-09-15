@@ -158,8 +158,164 @@ export function extractBubbleProduct(html: string, inputUrl: string, resolvedUrl
   return { store: "bubble", inputUrl, resolvedUrl, canonicalProductUrl, postUrl: inputUrl, rawTitle, imageUrl, currentPrice, oldPrice };
 }
 
+type BubbleBrowserPayload = {
+  productPage: true;
+  rawTitle: string;
+  imageUrl: string;
+  currency: string;
+  currentPrice: unknown;
+  oldPrice?: unknown;
+  moneyUnit: "minor" | "major";
+  canonicalProductUrl?: string;
+  variantSelection: BubblePriceSelection;
+};
+
+export function extractBubbleBrowserResult(json: string, inputUrl: string, resolvedUrl: string): ProductData {
+  let payload: BubbleBrowserPayload;
+  try { payload = JSON.parse(json) as BubbleBrowserPayload; }
+  catch { throw new ProductError("BROWSER_EXTRACTION_INVALID", "extraction", "Bubble browser extraction was not valid JSON"); }
+  if (!record(payload) || payload.productPage !== true) throw new ProductError("NOT_PRODUCT_PAGE", "extraction", "Bubble browser page markers unavailable");
+  const rawTitle = string(payload.rawTitle);
+  if (!rawTitle) throw new ProductError("MISSING_TITLE", "extraction", "Bubble browser title unavailable");
+  const currency = string(payload.currency);
+  let currentPrice: Price;
+  try {
+    currentPrice = payload.moneyUnit === "minor"
+      ? shopifyPrice(payload.currentPrice, currency)
+      : payload.moneyUnit === "major"
+        ? normalizePrice(payload.currentPrice, currency)
+        : (() => { throw new Error("Unknown money unit"); })();
+  } catch { throw new ProductError("MISSING_PRICE", "extraction", "Bubble browser current price invalid"); }
+  let oldPrice: Price | undefined;
+  if (payload.oldPrice !== undefined && payload.oldPrice !== null) {
+    try {
+      const candidate = payload.moneyUnit === "minor"
+        ? shopifyPrice(payload.oldPrice, currentPrice.currency)
+        : normalizePrice(payload.oldPrice, currentPrice.currency);
+      if (candidate.value > currentPrice.value) oldPrice = candidate;
+    } catch { /* Optional malformed compare-at price is omitted. */ }
+  }
+  let imageUrl: string;
+  try { imageUrl = validatePublicUrl(new URL(payload.imageUrl, resolvedUrl).href).href; }
+  catch { throw new ProductError("MISSING_IMAGE", "extraction", "Bubble browser image URL invalid"); }
+  let canonicalProductUrl: string | undefined;
+  if (string(payload.canonicalProductUrl)) {
+    try {
+      const canonical = validatePublicUrl(new URL(payload.canonicalProductUrl!, resolvedUrl).href);
+      if (bubbleAdapter.allowsHost(canonical.hostname)) canonicalProductUrl = canonical.href;
+    } catch { /* Optional canonical URL is omitted. */ }
+  }
+  return { store: "bubble", inputUrl, resolvedUrl, canonicalProductUrl, postUrl: inputUrl, rawTitle, imageUrl, currentPrice, oldPrice };
+}
+
+export function inspectBubbleBrowserResult(json: string): { variantSelection?: BubblePriceSelection } {
+  try {
+    const value = record(JSON.parse(json));
+    const selection = value?.variantSelection;
+    return { variantSelection: ["explicit_variant", "first_available_variant", "first_variant", "json_ld_offer", "product_meta"].includes(String(selection)) ? selection as BubblePriceSelection : undefined };
+  } catch { return {}; }
+}
+
+export function bubbleBrowserExtractionScript(nonce: string): string {
+  return `(() => {
+    const resultId = 'deal-bubble-extraction-${nonce}';
+    const allowedHost = () => location.hostname === 'hellobubble.com' || location.hostname.endsWith('.hellobubble.com');
+    const object = value => value && typeof value === 'object' && !Array.isArray(value) ? value : undefined;
+    const text = value => typeof value === 'string' && value.trim() ? value.trim() : undefined;
+    const first = value => Array.isArray(value) ? value[0] : value;
+    const meta = name => document.querySelector('meta[property="' + name + '"], meta[name="' + name + '"]')?.content?.trim() || undefined;
+    const productHandle = () => {
+      const parts = location.pathname.split('/').filter(Boolean);
+      return parts[0] === 'products' && parts[1] ? decodeURIComponent(parts[1]) : undefined;
+    };
+    const productJsonLd = () => {
+      for (const node of document.querySelectorAll('script[type="application/ld+json"]')) {
+        try {
+          const parsed = JSON.parse(node.textContent || '');
+          const roots = Array.isArray(parsed) ? parsed : [parsed];
+          for (const root of roots) {
+            const graph = Array.isArray(object(root)?.['@graph']) ? object(root)['@graph'] : [];
+            const found = [...graph, root].map(object).find(item => item && (item['@type'] === 'Product' || (Array.isArray(item['@type']) && item['@type'].includes('Product'))));
+            if (found) return found;
+          }
+        } catch {}
+      }
+    };
+    const shopifyProduct = handle => {
+      const globals = [object(globalThis.meta)?.product, object(object(globalThis.ShopifyAnalytics)?.meta)?.product];
+      for (const node of document.querySelectorAll('script[type="application/json"]')) {
+        try {
+          const root = object(JSON.parse(node.textContent || ''));
+          globals.push(root, object(root?.product));
+        } catch {}
+      }
+      return globals.map(object).find(item => item && Array.isArray(item.variants) && text(item.title) && (!handle || !text(item.handle) || text(item.handle) === handle));
+    };
+    const exactOffer = product => {
+      const offers = Array.isArray(product?.offers) ? product.offers : [product?.offers];
+      return offers.map(object).find(offer => offer && offer.price !== undefined);
+    };
+    const imageFrom = value => text(value) || text(object(value)?.src) || text(object(value)?.url);
+    const emit = payload => {
+      if (!allowedHost() || document.getElementById(resultId)) return;
+      const marker = document.createElement('div');
+      marker.id = resultId;
+      marker.dataset.dealBubbleExtraction = '${nonce}';
+      marker.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;overflow:hidden;opacity:.001;pointer-events:none;z-index:-1';
+      marker.textContent = JSON.stringify(payload);
+      document.documentElement.appendChild(marker);
+    };
+    const check = () => {
+      if (!allowedHost()) return;
+      const handle = productHandle();
+      const root = document.querySelector('main#MainContent, main[role="main"], main');
+      const titleElement = root?.querySelector('h1');
+      const purchaseForm = root?.querySelector('form[action*="/cart/add"]');
+      if (!handle || !root || !titleElement || !purchaseForm) return;
+      const product = productJsonLd();
+      const offer = exactOffer(product);
+      const state = shopifyProduct(handle);
+      const variants = (Array.isArray(state?.variants) ? state.variants : []).map(object).filter(Boolean);
+      const requestedVariant = new URL(location.href).searchParams.get('variant');
+      const explicit = requestedVariant ? variants.find(variant => String(variant.id) === requestedVariant) : undefined;
+      const available = explicit ? undefined : variants.find(variant => variant.available !== false);
+      const selected = explicit || available || variants[0];
+      let currentPrice;
+      let oldPrice;
+      let moneyUnit;
+      let variantSelection;
+      if (selected || state?.price !== undefined) {
+        currentPrice = selected?.price ?? state.price;
+        oldPrice = selected ? selected.compare_at_price : state.compare_at_price;
+        moneyUnit = 'minor';
+        variantSelection = explicit ? 'explicit_variant' : available ? 'first_available_variant' : 'first_variant';
+      } else if (offer?.price !== undefined) {
+        currentPrice = offer.price;
+        oldPrice = offer.wasPrice ?? offer.listPrice ?? offer.compareAtPrice ?? product?.wasPrice ?? product?.listPrice ?? product?.compareAtPrice;
+        moneyUnit = 'major';
+        variantSelection = 'json_ld_offer';
+      } else if (meta('product:price:amount')) {
+        currentPrice = meta('product:price:amount');
+        oldPrice = meta('product:original_price:amount');
+        moneyUnit = 'major';
+        variantSelection = 'product_meta';
+      } else return;
+      const rawTitle = text(product?.name) || text(state?.title) || titleElement.textContent?.trim() || meta('og:title');
+      const hero = root.querySelector('picture img, img');
+      const imageUrl = imageFrom(first(product?.image)) || imageFrom(selected?.featured_image) || imageFrom(state?.featured_image) || imageFrom(first(state?.images)) || hero?.currentSrc || hero?.src || meta('og:image');
+      const currency = text(offer?.priceCurrency) || text(state?.currency) || text(globalThis.Shopify?.currency?.active) || meta('product:price:currency');
+      if (!rawTitle || !imageUrl || currentPrice === undefined || !currency) return;
+      const canonicalProductUrl = text(product?.url) || text(state?.url) || document.querySelector('link[rel="canonical"]')?.href;
+      emit({ productPage:true, rawTitle, imageUrl, currency, currentPrice, oldPrice, moneyUnit, canonicalProductUrl, variantSelection });
+    };
+    new MutationObserver(check).observe(document, { childList:true, subtree:true });
+    check();
+  })();`;
+}
+
 export const bubbleAdapter: ScreenshotStoreAdapter = {
   store: "bubble",
+  extractionMode: "browser-page",
   allowsHost: hostname => hostname === "hellobubble.com" || hostname.endsWith(".hellobubble.com"),
   extract: extractBubbleProduct,
   inspect: inspectBubbleHtml,
@@ -203,5 +359,9 @@ export const bubbleAdapter: ScreenshotStoreAdapter = {
     };
     new MutationObserver(check).observe(document, { childList: true, subtree: true });
     check();
-  })();`
+  })();`,
+  browserExtractionSelector: nonce => `#deal-bubble-extraction-${nonce}[data-deal-bubble-extraction="${nonce}"]`,
+  browserExtractionScript: bubbleBrowserExtractionScript,
+  extractBrowserResult: extractBubbleBrowserResult,
+  inspectBrowserResult: inspectBubbleBrowserResult
 };

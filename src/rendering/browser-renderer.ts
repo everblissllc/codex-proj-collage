@@ -1,19 +1,19 @@
 import { ProductError, type BrowserDiagnostics } from "../types";
 import type { ScreenshotRenderer, CardImage } from "./types";
 
-function safeStatusText(value: string): string | undefined {
+export function safeBrowserStatusText(value: string): string | undefined {
   const standard = new Set(["Bad Request", "Request Timeout", "Payload Too Large", "Unprocessable Entity", "Too Many Requests", "Internal Server Error", "Bad Gateway", "Service Unavailable", "Gateway Timeout"]);
   return standard.has(value) ? value : undefined;
 }
 
-function browserMsUsed(response: Response): number | undefined {
+export function browserMsUsed(response: Response): number | undefined {
   const value = response.headers.get("x-browser-ms-used");
   if (!value || !/^\d+$/.test(value)) return undefined;
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
-async function boundedErrorMessage(response: Response): Promise<string> {
+export async function boundedBrowserErrorMessage(response: Response): Promise<string> {
   if (!response.headers.get("content-type")?.toLowerCase().includes("json") || !response.body) return "";
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -48,7 +48,7 @@ async function boundedErrorMessage(response: Response): Promise<string> {
   }
 }
 
-function classifyBrowserError(status: number, message: string): string {
+export function classifyBrowserError(status: number, message: string): string {
   if (status === 429) {
     if (/browser time limit exceeded for today|daily (?:browser |usage )?limit|(?:browser|account|monthly) (?:usage |browser )?quota|usage limit exceeded/i.test(message)) return "BROWSER_USAGE_LIMIT";
     if (/quick actions?|requests? per second|too many requests|rate.?limit/i.test(message)) return "BROWSER_QUICK_ACTION_RATE_LIMIT";
@@ -106,10 +106,10 @@ export class BrowserScreenshotRenderer implements ScreenshotRenderer {
         const attemptStarted = Date.now();
         const response = await this.browser.quickAction("screenshot", options);
         if (!response.ok) {
-          const message = await boundedErrorMessage(response).catch(() => "");
+          const message = await boundedBrowserErrorMessage(response).catch(() => "");
           const diagnostics: BrowserDiagnostics = {
             browserStatus: response.status,
-            browserStatusText: safeStatusText(response.statusText),
+            browserStatusText: safeBrowserStatusText(response.statusText),
             browserDurationMs: Date.now() - attemptStarted,
             browserMsUsed: browserMsUsed(response),
             browserReason: classifyBrowserError(response.status, message)
