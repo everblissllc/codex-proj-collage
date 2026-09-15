@@ -12,8 +12,11 @@ import type { CardImage, ScreenshotRenderer } from "../rendering/types";
 import type { FetchLike } from "../network/worker-fetch";
 import { productStateCacheKey, usableWalmartProductId } from "../cache/cache-key";
 import type { CardCache, CacheIdentity, CacheLookup } from "../cache/types";
+import { screenshotStore } from "../stores/screenshot/registry";
+import { processScreenshotStore } from "./process-screenshot-store";
+import type { MobilePageScreenshotRenderer } from "../rendering/mobile-page-renderer";
 
-export type ProcessDeps = { fetcher: FetchLike; copyProvider: CopyProvider; renderer: ScreenshotRenderer; disclosure: string; requestId: string; telegramUserId?: number; dnsCheck?: DnsCheck; cardCache?: CardCache };
+export type ProcessDeps = { fetcher: FetchLike; copyProvider: CopyProvider; renderer: ScreenshotRenderer; pageRenderer?: MobilePageScreenshotRenderer; disclosure: string; requestId: string; telegramUserId?: number; dnsCheck?: DnsCheck; cardCache?: CardCache };
 export type ProcessResult = { product: ProductData; content: GeneratedContent; card: CardImage };
 
 type CacheDecision = { kind: "hit"; result: Extract<CacheLookup, { kind: "hit" }> } | { kind: "claimed"; token: string } | { kind: "bypass" };
@@ -77,13 +80,39 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
   try {
     validatePublicUrl(inputUrl);
     const directStore = detectStore(inputUrl);
-    if (directStore && directStore !== "walmart") throw new ProductError("UNSUPPORTED_STORE", "store", `Unsupported store: ${directStore}`);
+    if (directStore && directStore !== "walmart" && !screenshotStore(directStore)) throw new ProductError("UNSUPPORTED_STORE", "store", `Unsupported store: ${directStore}`);
     const extractionStart = Date.now();
     const page = await resolveUrl(inputUrl, deps.fetcher, undefined, deps.dnsCheck);
     hostname = new URL(page.resolvedUrl).hostname;
     console.log(JSON.stringify({ event: "redirect_resolved", ...base, hostname }));
     store = detectStore(page.resolvedUrl);
     console.log(JSON.stringify({ event: "store_detected", ...base, hostname, store: store ?? "unsupported" }));
+    const adapter = store ? screenshotStore(store) : undefined;
+    if (directStore === "elf" && store !== "elf") {
+      await page.response.body?.cancel();
+      throw new ProductError("UNSAFE_SCREENSHOT_URL", "url", "Cross-store screenshot redirect rejected");
+    }
+    if (adapter) {
+      const { text: html, byteLength: responseByteLength } = await readLimitedTextWithSize(page.response);
+      const diagnostics = adapter.inspect(html);
+      const mimeHeader = page.response.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+      const contentType = mimeHeader && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(mimeHeader) ? mimeHeader : "unknown";
+      console.log(JSON.stringify({ event: `${store}_extraction_diagnostics`, ...base, hostname, httpStatus: page.response.status, contentType, responseByteLength, redirectCount: page.redirectCount, ...diagnostics }));
+      const product = adapter.extract(html, inputUrl, page.resolvedUrl);
+      extractionDurationMs = Date.now() - extractionStart;
+      console.log(JSON.stringify({ event: "extraction_complete", ...base, store, hostname, extractionDurationMs }));
+      console.log(JSON.stringify({ event: "card_cache_disabled", ...base, store, reason: "SCREENSHOT_STORE_CACHE_DISABLED" }));
+      if (!deps.pageRenderer) throw new ProductError("RENDERER_MISSING", "render", "Mobile page renderer unavailable");
+      const result = await processScreenshotStore(product, adapter, {
+        copyProvider: deps.copyProvider, pageRenderer: deps.pageRenderer,
+        disclosure: deps.disclosure, requestId: deps.requestId,
+        onAiFailure: failure => console.warn(JSON.stringify({ event: "ai_attempt_failed", ...base, ...failure }))
+      });
+      aiDurationMs = result.aiDurationMs;
+      renderDurationMs = result.renderDurationMs;
+      console.log(JSON.stringify({ event: "process_complete", ...base, store, hostname, extractionDurationMs, aiDurationMs, renderDurationMs, cacheStatus: "disabled", totalDurationMs: Date.now() - started, success: true }));
+      return { product, content: result.content, card: result.card };
+    }
     if (store !== "walmart") {
       await page.response.body?.cancel();
       throw new ProductError("UNSUPPORTED_STORE", "store", `Unsupported store: ${store ?? "unknown"}`);

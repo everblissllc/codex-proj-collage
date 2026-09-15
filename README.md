@@ -1,12 +1,14 @@
 # Affiliate deal card Telegram Worker
 
-One Telegram product link produces a Walmart deal-card PNG and a separate Facebook post. Other store identifiers are recognized for routing, but their extractors and templates are intentionally unimplemented.
+One Telegram product link produces a PNG and a separate Facebook post. Walmart uses extracted data and a custom HTML deal card. e.l.f. Cosmetics uses extracted data and a screenshot of the real mobile product-page section. Other stores remain unimplemented.
 
 ## Flow
 
 `POST /telegram/webhook` validates Telegram's secret header and enqueues one job. The Queue consumer resolves up to five HTTP redirects, validates every destination, extracts the Walmart page once, asks the configured copy provider for structured text, fetches the product image, renders controlled HTML through the Browser Run binding, and sends a photo followed by plain Facebook text. `GET /health` is a simple health response.
 
 The original user URL remains `inputUrl` and becomes `postUrl`; `resolvedUrl` is used for store detection and extraction; `canonicalProductUrl` is optional metadata. The AI never receives the affiliate URL. Telegram URL entities are used to preserve the exact link text when available; a text parser is the fallback. The post URL is appended by code, never rewritten by AI.
+
+For e.l.f., JSON-LD Product offers supply the authoritative price; explicit previous/list prices are optional. A separate Browser Run Quick Actions renderer navigates to the approved e.l.f. product URL with a 430×932 mobile viewport and screenshots the product wrapper containing the gallery and purchase information. It does not recreate the retailer's page in HTML. e.l.f. currently bypasses the D1/R2 card cache because the live page can change independently of extracted price metadata. The page screenshot depends on e.l.f.'s live DOM and Cloudflare Browser Rendering availability; selectors should be rechecked when the site changes.
 
 Walmart extraction tries JSON-LD `Product` and `Offer` first, then embedded `__NEXT_DATA__` product state, then OpenGraph and product-price meta tags. The current price must parse as a positive USD amount. Old price is shown only for explicit `wasPrice`, `listPrice`, or `product:original_price:amount` metadata when greater than the current price. A JSON-LD `highPrice` is never treated as an old price. The product image is fetched separately with a size and MIME limit, then embedded as a data URL so Browser Run does not load any outside resource while making the card.
 

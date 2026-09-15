@@ -86,22 +86,25 @@ export class BrowserScreenshotRenderer implements ScreenshotRenderer {
   ) {}
 
   async screenshot(html: string, width: number, height: number, requestId?: string): Promise<CardImage> {
+    return this.capture({
+      html,
+      viewport: { width, height },
+      screenshotOptions: { type: "png" },
+      gotoOptions: { waitUntil: "domcontentloaded", timeout: 8000 },
+      waitForSelector: { selector: '.card[data-card-ready="true"]', visible: true, timeout: 5000 },
+      selector: '.card[data-card-ready="true"]',
+      setJavaScriptEnabled: true,
+      actionTimeout: 8000,
+      bestAttempt: true
+    }, requestId);
+  }
+
+  protected async capture(options: BrowserRunScreenshotOptions, requestId?: string, mobile = false): Promise<CardImage> {
     const started = Date.now();
     try {
-      const readySelector = '.card[data-card-ready="true"]';
       for (let attempt = 1; attempt <= 2; attempt++) {
         const attemptStarted = Date.now();
-        const response = await this.browser.quickAction("screenshot", {
-          html,
-          viewport: { width, height },
-          screenshotOptions: { type: "png" },
-          gotoOptions: { waitUntil: "domcontentloaded", timeout: 8000 },
-          waitForSelector: { selector: readySelector, visible: true, timeout: 5000 },
-          selector: readySelector,
-          setJavaScriptEnabled: true,
-          actionTimeout: 8000,
-          bestAttempt: true
-        });
+        const response = await this.browser.quickAction("screenshot", options);
         if (!response.ok) {
           const message = await boundedErrorMessage(response).catch(() => "");
           const diagnostics: BrowserDiagnostics = {
@@ -114,7 +117,7 @@ export class BrowserScreenshotRenderer implements ScreenshotRenderer {
           const retryScheduled = response.status === 429 && diagnostics.browserReason !== "BROWSER_USAGE_LIMIT" && attempt === 1;
           const retryDelayMs = retryScheduled ? browserRateLimitDelayMs(response.headers.get("Retry-After"), this.random()) : undefined;
           console.warn(JSON.stringify({
-            event: "browser_render_attempt_failed", requestId, attempt,
+            event: mobile ? "mobile_product_screenshot_attempt_failed" : "browser_render_attempt_failed", requestId, attempt,
             browserStatus: diagnostics.browserStatus, browserReason: diagnostics.browserReason,
             browserDurationMs: diagnostics.browserDurationMs, browserMsUsed: diagnostics.browserMsUsed,
             retryScheduled, retryDelayMs
@@ -130,14 +133,14 @@ export class BrowserScreenshotRenderer implements ScreenshotRenderer {
         if (bytes.length < 8 || bytes[0] !== 137 || bytes[1] !== 80 || bytes[2] !== 78 || bytes[3] !== 71) {
           throw new ProductError("BROWSER_BAD_IMAGE", "render", "Browser Run did not return a PNG");
         }
-        console.log(JSON.stringify({ event: "browser_render_complete", requestId, browserDurationMs: Date.now() - started, browserMsUsed: browserMsUsed(response), outputBytes: bytes.length, mimeType: "image/png", attemptsUsed: attempt }));
+        console.log(JSON.stringify({ event: mobile ? "mobile_product_screenshot_complete" : "browser_render_complete", requestId, browserDurationMs: Date.now() - started, browserMsUsed: browserMsUsed(response), outputBytes: bytes.length, mimeType: "image/png", attemptsUsed: attempt }));
         return { bytes, mimeType: "image/png" };
       }
       throw new ProductError("BROWSER_ERROR", "render", "Browser Run retry exhausted");
     } catch (error) {
       const diagnostics = error instanceof ProductError ? error.browserDiagnostics : undefined;
       console.error(JSON.stringify({
-        event: "browser_render_failed", requestId,
+        event: mobile ? "mobile_product_screenshot_failed" : "browser_render_failed", requestId,
         browserDurationMs: diagnostics?.browserDurationMs ?? Date.now() - started,
         browserStatus: diagnostics?.browserStatus,
         browserStatusText: diagnostics?.browserStatusText,
