@@ -72,6 +72,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl --fail --silent --show-error --request DELETE \
+          status=$(curl --silent --show-error --output /tmp/amazon-pilot-delete.json --write-out '%{http_code}' --request DELETE \
             --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/affiliate-deal-card-amazon-pilot"
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/affiliate-deal-card-amazon-pilot")
+          if [[ "$status" != "200" && "$status" != "404" ]]; then
+            echo "Temporary Worker cleanup failed with HTTP ${status}."
+            exit 1
+          fi

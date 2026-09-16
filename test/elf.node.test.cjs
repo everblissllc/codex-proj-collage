@@ -136,10 +136,9 @@ test('Workers AI receives only raw e.l.f. title, never affiliate or price URLs',
   const p=extractElfProduct(html,input,resolved);
   const requests=[];
   const provider=new WorkersAICopyProvider({run:async (_model,request)=>{requests.push(request);return {response:'{"shortTitle":"Hydrating Camo Concealer"}'};}},'test-model');
-  await provider.generate(p);
+  await provider.generate(p.rawTitle);
   assert.equal(requests.length,1);
-  assert.ok(JSON.stringify(requests).includes(p.rawTitle));
-  assert.ok(!JSON.stringify(requests).includes(input));
-  assert.ok(!JSON.stringify(requests).includes(resolved));
+  assert.equal(requests[0].messages[1].content,JSON.stringify({rawTitle:p.rawTitle}));
+  assert.doesNotMatch(requests[0].messages[1].content,/https?:\/\//i);
   assert.ok(!JSON.stringify(requests).includes('$8'));
 });
