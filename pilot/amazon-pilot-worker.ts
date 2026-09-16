@@ -145,6 +145,7 @@ async function runPilot(env: Env) {
   const pageLoader = new BrowserAmazonPageLoader(browser);
   const reports: Array<Record<string, unknown>> = [];
   const cards: Array<{ bytes: Uint8Array; hasOldPrice: boolean }> = [];
+  const successful: Array<{ inputUrl: string; asin: string; cacheKeyPrefix: string }> = [];
 
   for (const product of products) {
     const fetchObservation: FetchObservation = { amazonStatuses: [] };
@@ -152,68 +153,96 @@ async function runPilot(env: Env) {
     const screenshotBefore = browserObservation.screenshotCalls;
     const aiBefore = copy.calls;
     const renderBefore = renderer.calls;
-    const result = await processProductLink(product.inputUrl, {
-      fetcher: observedFetcher(fetchObservation),
-      copyProvider: copy,
-      renderer,
-      amazonPageLoader: pageLoader,
-      disclosure: env.AFFILIATE_DISCLOSURE || "#Ad",
-      requestId: `amazon-pilot-${product.label}`,
-      cardCache: cache
-    });
-    const asin = amazonAsinFromUrl(result.product.resolvedUrl);
-    if (!asin) throw new Error("Resolved Amazon ASIN unavailable");
-    const identity = await productStateCacheKey(result.product, asin);
-    const fallbackUsed = browserObservation.contentCalls > contentBefore;
-    reports.push({
-      label: product.label,
-      asin,
-      workerHttpStatus: fetchObservation.amazonStatuses.at(-1),
-      workerHtmlAccepted: !fallbackUsed,
-      browserFallbackUsed: fallbackUsed,
-      browserOriginStatus: fallbackUsed ? browserObservation.lastOriginStatus : undefined,
-      finalHostname: new URL(result.product.resolvedUrl).hostname,
-      finalHostAllowed: fallbackUsed ? browserObservation.lastFinalHostAllowed : true,
-      extractionSource: fallbackUsed ? "browser-content" : "worker-html",
-      currentPrice: result.product.currentPrice.formatted,
-      oldPrice: result.product.oldPrice?.formatted,
-      variantIdentity: asin,
-      cacheKeyPrefix: identity.keyPrefix,
-      postUrlPreserved: result.product.postUrl === product.inputUrl && result.content.facebookPost.endsWith(product.inputUrl),
-      aiCalls: copy.calls - aiBefore,
-      renderCalls: renderer.calls - renderBefore,
-      browserScreenshotAttempts: browserObservation.screenshotCalls - screenshotBefore
-    });
-    cards.push({ bytes: result.card.bytes, hasOldPrice: Boolean(result.product.oldPrice) });
+    try {
+      const result = await processProductLink(product.inputUrl, {
+        fetcher: observedFetcher(fetchObservation),
+        copyProvider: copy,
+        renderer,
+        amazonPageLoader: pageLoader,
+        disclosure: env.AFFILIATE_DISCLOSURE || "#Ad",
+        requestId: `amazon-pilot-${product.label}`,
+        cardCache: cache
+      });
+      const asin = amazonAsinFromUrl(result.product.resolvedUrl);
+      if (!asin) throw new Error("Resolved Amazon ASIN unavailable");
+      const identity = await productStateCacheKey(result.product, asin);
+      const fallbackUsed = browserObservation.contentCalls > contentBefore;
+      reports.push({
+        label: product.label,
+        success: true,
+        asin,
+        workerHttpStatus: fetchObservation.amazonStatuses.at(-1),
+        workerHtmlAccepted: !fallbackUsed,
+        browserFallbackUsed: fallbackUsed,
+        browserOriginStatus: fallbackUsed ? browserObservation.lastOriginStatus : undefined,
+        finalHostname: new URL(result.product.resolvedUrl).hostname,
+        finalHostAllowed: fallbackUsed ? browserObservation.lastFinalHostAllowed : true,
+        extractionSource: fallbackUsed ? "browser-content" : "worker-html",
+        currentPrice: result.product.currentPrice.formatted,
+        oldPrice: result.product.oldPrice?.formatted,
+        variantIdentity: asin,
+        cacheKeyPrefix: identity.keyPrefix,
+        postUrlPreserved: result.product.postUrl === product.inputUrl && result.content.facebookPost.endsWith(product.inputUrl),
+        aiCalls: copy.calls - aiBefore,
+        renderCalls: renderer.calls - renderBefore,
+        browserScreenshotAttempts: browserObservation.screenshotCalls - screenshotBefore
+      });
+      successful.push({ inputUrl: product.inputUrl, asin, cacheKeyPrefix: identity.keyPrefix });
+      cards.push({ bytes: result.card.bytes, hasOldPrice: Boolean(result.product.oldPrice) });
+    } catch (error) {
+      const failure = error as { code?: unknown; stage?: unknown };
+      const fallbackUsed = browserObservation.contentCalls > contentBefore;
+      reports.push({
+        label: product.label,
+        success: false,
+        asin: amazonAsinFromUrl(product.inputUrl),
+        workerHttpStatus: fetchObservation.amazonStatuses.at(-1),
+        workerHtmlAccepted: !fallbackUsed,
+        browserFallbackUsed: fallbackUsed,
+        browserOriginStatus: fallbackUsed ? browserObservation.lastOriginStatus : undefined,
+        finalHostname: browserObservation.lastFinalHostname,
+        finalHostAllowed: fallbackUsed ? browserObservation.lastFinalHostAllowed : undefined,
+        extractionSource: fallbackUsed ? "browser-content" : "worker-html",
+        errorCode: String(failure.code ?? "PILOT_PRODUCT_FAILED"),
+        errorStage: String(failure.stage ?? "unknown"),
+        aiCalls: copy.calls - aiBefore,
+        renderCalls: renderer.calls - renderBefore,
+        browserScreenshotAttempts: browserObservation.screenshotCalls - screenshotBefore
+      });
+    }
   }
 
-  const repeatUrl = "https://www.amazon.com/dp/B00MNV8E0C?ref_=amazon_pilot_b";
-  const repeatFetch: FetchObservation = { amazonStatuses: [] };
-  const aiBeforeRepeat = copy.calls;
-  const renderBeforeRepeat = renderer.calls;
-  const screenshotBeforeRepeat = browserObservation.screenshotCalls;
-  const repeat = await processProductLink(repeatUrl, {
-    fetcher: observedFetcher(repeatFetch), copyProvider: copy, renderer, amazonPageLoader: pageLoader,
-    disclosure: env.AFFILIATE_DISCLOSURE || "#Ad", requestId: "amazon-pilot-cache-hit", cardCache: cache
-  });
-  const first = reports[0];
-  const repeatAsin = amazonAsinFromUrl(repeat.product.resolvedUrl);
-  if (!repeatAsin) throw new Error("Repeat ASIN unavailable");
-  const repeatIdentity = await productStateCacheKey(repeat.product, repeatAsin);
-  const cacheReport = {
-    hit: repeatIdentity.keyPrefix === first.cacheKeyPrefix,
-    aiCallsOnHit: copy.calls - aiBeforeRepeat,
-    renderCallsOnHit: renderer.calls - renderBeforeRepeat,
-    browserScreenshotCallsOnHit: browserObservation.screenshotCalls - screenshotBeforeRepeat,
-    newPostUrlPreserved: repeat.product.postUrl === repeatUrl && repeat.content.facebookPost.endsWith(repeatUrl),
-    priorPostUrlAbsent: !repeat.content.facebookPost.includes(String(products[0].inputUrl)),
-    persistentStateContainsEitherUrl: cache.contains(products[0].inputUrl) || cache.contains(repeatUrl),
-    variantIdentitiesDistinct: reports[0].cacheKeyPrefix !== reports[1].cacheKeyPrefix
-  };
+  let cacheReport: Record<string, unknown> = { tested: false, variantIdentitiesDistinct: false };
+  const cacheSource = successful[0];
+  if (cacheSource) {
+    const repeatUrl = `https://www.amazon.com/dp/${cacheSource.asin}?ref_=amazon_pilot_b`;
+    const repeatFetch: FetchObservation = { amazonStatuses: [] };
+    const aiBeforeRepeat = copy.calls;
+    const renderBeforeRepeat = renderer.calls;
+    const screenshotBeforeRepeat = browserObservation.screenshotCalls;
+    const repeat = await processProductLink(repeatUrl, {
+      fetcher: observedFetcher(repeatFetch), copyProvider: copy, renderer, amazonPageLoader: pageLoader,
+      disclosure: env.AFFILIATE_DISCLOSURE || "#Ad", requestId: "amazon-pilot-cache-hit", cardCache: cache
+    });
+    const repeatAsin = amazonAsinFromUrl(repeat.product.resolvedUrl);
+    if (!repeatAsin) throw new Error("Repeat ASIN unavailable");
+    const repeatIdentity = await productStateCacheKey(repeat.product, repeatAsin);
+    cacheReport = {
+      tested: true,
+      hit: repeatIdentity.keyPrefix === cacheSource.cacheKeyPrefix,
+      aiCallsOnHit: copy.calls - aiBeforeRepeat,
+      renderCallsOnHit: renderer.calls - renderBeforeRepeat,
+      browserScreenshotCallsOnHit: browserObservation.screenshotCalls - screenshotBeforeRepeat,
+      newPostUrlPreserved: repeat.product.postUrl === repeatUrl && repeat.content.facebookPost.endsWith(repeatUrl),
+      priorPostUrlAbsent: !repeat.content.facebookPost.includes(cacheSource.inputUrl),
+      persistentStateContainsEitherUrl: cache.contains(cacheSource.inputUrl) || cache.contains(repeatUrl),
+      variantIdentitiesDistinct: successful.length === 2 && successful[0].cacheKeyPrefix !== successful[1].cacheKeyPrefix
+    };
+  }
 
   const selected = cards.find(card => card.hasOldPrice) ?? cards[0];
-  const dimensions = pngSize(selected.bytes);
-  const pass = reports.length === 2 && reports.every(report => report.finalHostAllowed && report.postUrlPreserved) &&
+  const dimensions = selected ? pngSize(selected.bytes) : { width: 0, height: 0 };
+  const pass = successful.length === 2 && reports.every(report => report.success && report.finalHostAllowed && report.postUrlPreserved) &&
     !copy.inputHadUrl && cacheReport.hit && cacheReport.aiCallsOnHit === 0 && cacheReport.renderCallsOnHit === 0 &&
     cacheReport.browserScreenshotCallsOnHit === 0 && cacheReport.newPostUrlPreserved && cacheReport.priorPostUrlAbsent &&
     !cacheReport.persistentStateContainsEitherUrl && cacheReport.variantIdentitiesDistinct && dimensions.width === 1200 && dimensions.height === 1200;
@@ -226,7 +255,7 @@ async function runPilot(env: Env) {
       card: {
         width: dimensions.width,
         height: dimensions.height,
-        byteSize: selected.bytes.length,
+        byteSize: selected?.bytes.length ?? 0,
         browserRenderDurationMs: renderer.durationMs,
         screenshotCalls: browserObservation.screenshotCalls,
         retryNeeded: reports.some(report => Number(report.browserScreenshotAttempts) > 1),
@@ -234,7 +263,7 @@ async function runPilot(env: Env) {
       },
       liveAffiliateLinkExercised: false
     },
-    pngBase64: base64(selected.bytes)
+    pngBase64: selected ? base64(selected.bytes) : ""
   };
 }
 
