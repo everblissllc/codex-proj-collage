@@ -43,6 +43,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          ready=false
+          for attempt in {1..15}; do
+            if curl --fail --silent --show-error --max-time 10 "${{ steps.deploy.outputs.worker_url }}/health" > /dev/null; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          test "$ready" = true
           curl --fail --silent --show-error --max-time 180 \
             "${{ steps.deploy.outputs.worker_url }}/pilot" > /tmp/amazon-pilot-result.json
           node - <<'NODE'

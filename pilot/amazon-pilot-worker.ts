@@ -240,7 +240,9 @@ async function runPilot(env: Env) {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (new URL(request.url).pathname !== "/pilot") return new Response("Not found", { status: 404 });
+    const pathname = new URL(request.url).pathname;
+    if (pathname === "/health") return Response.json({ ok: true });
+    if (pathname !== "/pilot") return new Response("Not found", { status: 404 });
     try { return Response.json(await runPilot(env)); }
     catch (error) {
       const value = error as { name?: unknown; code?: unknown; stage?: unknown; message?: unknown };
