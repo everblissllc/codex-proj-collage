@@ -52,11 +52,13 @@ jobs:
             sleep 2
           done
           test "$ready" = true
-          curl --fail --silent --show-error --max-time 180 \
-            "${{ steps.deploy.outputs.worker_url }}/" > /tmp/amazon-pilot-result.json
+          pilot_status=$(curl --silent --show-error --max-time 180 --output /tmp/amazon-pilot-result.json --write-out '%{http_code}' \
+            "${{ steps.deploy.outputs.worker_url }}/")
           node - <<'NODE'
           const fs = require("node:fs");
-          const result = JSON.parse(fs.readFileSync("/tmp/amazon-pilot-result.json", "utf8"));
+          let result;
+          try { result = JSON.parse(fs.readFileSync("/tmp/amazon-pilot-result.json", "utf8")); }
+          catch { console.error(JSON.stringify({ event: "amazon_pilot_failed", code: "NON_JSON_RESPONSE" })); process.exit(1); }
           if (result.error) {
             console.error(JSON.stringify({ event: "amazon_pilot_failed", ...result.error }));
             process.exit(1);
@@ -68,6 +70,7 @@ jobs:
           if (png.length !== safe.card.byteSize || png.readUInt32BE(16) !== safe.card.width || png.readUInt32BE(20) !== safe.card.height) process.exit(3);
           fs.writeFileSync("amazon-card-pilot.png", png);
           NODE
+          test "$pilot_status" = "200"
       - name: Upload Amazon card artifact
         if: success()
         uses: actions/upload-artifact@v4
