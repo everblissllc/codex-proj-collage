@@ -5,7 +5,7 @@ import { workerFetch, type FetchLike } from "../src/network/worker-fetch";
 import { processProductLink } from "../src/orchestration/process-product-link";
 import { BrowserScreenshotRenderer } from "../src/rendering/browser-renderer";
 import type { CardImage, ScreenshotRenderer } from "../src/rendering/types";
-import { amazonAsinFromUrl } from "../src/stores/amazon/diagnostics";
+import { amazonAsinFromUrl, inspectAmazonHtml, type AmazonHtmlDiagnostics } from "../src/stores/amazon/diagnostics";
 import { BrowserAmazonPageLoader } from "../src/stores/amazon/page-loader";
 import type { CopyDraft } from "../src/types";
 
@@ -23,9 +23,10 @@ type BrowserObservation = {
   lastFinalHostname?: string;
   lastFinalHostAllowed?: boolean;
   lastBrowserMsUsed?: number;
+  contentDiagnostics?: AmazonHtmlDiagnostics;
 };
 
-type FetchObservation = { amazonStatuses: number[] };
+type FetchObservation = { amazonStatuses: number[]; diagnostics?: AmazonHtmlDiagnostics };
 
 class MemoryCardCache implements CardCache {
   private readonly entries = new Map<string, { shortTitle: string; card: CardImage }>();
@@ -74,6 +75,7 @@ function instrumentedBrowser(env: Env, observation: BrowserObservation): Browser
             const hostname = new URL(payload.meta.finalUrl).hostname.toLowerCase();
             observation.lastFinalHostname = hostname;
             observation.lastFinalHostAllowed = hostname === "amazon.com" || hostname.endsWith(".amazon.com");
+            if (typeof (payload as { result?: unknown }).result === "string") observation.contentDiagnostics = inspectAmazonHtml((payload as { result: string }).result, payload.meta.finalUrl);
           }
         }
         return response;
@@ -92,7 +94,13 @@ function observedFetcher(observation: FetchObservation): FetchLike {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const response = await workerFetch(input, init);
     const hostname = new URL(raw).hostname.toLowerCase();
-    if (hostname === "amazon.com" || hostname.endsWith(".amazon.com")) observation.amazonStatuses.push(response.status);
+    if (hostname === "amazon.com" || hostname.endsWith(".amazon.com")) {
+      observation.amazonStatuses.push(response.status);
+      if (response.ok && response.headers.get("content-type")?.toLowerCase().includes("text/html")) {
+        const html = await response.clone().text();
+        observation.diagnostics = inspectAmazonHtml(html, raw);
+      }
+    }
     return response;
   };
 }
@@ -134,7 +142,7 @@ function base64(bytes: Uint8Array): string {
 
 async function runPilot(env: Env) {
   const products = [
-    { label: "worker-primary", inputUrl: "https://www.amazon.com/dp/B00MNV8E0C?ref_=amazon_pilot_a" },
+    { label: "worker-primary", inputUrl: "https://www.amazon.com/dp/B07HYXJ8Z7?ref_=amazon_pilot_a" },
     { label: "fallback-candidate", inputUrl: "https://www.amazon.com/dp/B08HNBHSQV?ref_=amazon_pilot_reference" }
   ] as const;
   const browserObservation: BrowserObservation = { contentCalls: 0, screenshotCalls: 0 };
@@ -205,6 +213,8 @@ async function runPilot(env: Env) {
         extractionSource: fallbackUsed ? "browser-content" : "worker-html",
         errorCode: String(failure.code ?? "PILOT_PRODUCT_FAILED"),
         errorStage: String(failure.stage ?? "unknown"),
+        workerDiagnostics: fetchObservation.diagnostics,
+        browserDiagnostics: fallbackUsed ? browserObservation.contentDiagnostics : undefined,
         aiCalls: copy.calls - aiBefore,
         renderCalls: renderer.calls - renderBefore,
         browserScreenshotAttempts: browserObservation.screenshotCalls - screenshotBefore

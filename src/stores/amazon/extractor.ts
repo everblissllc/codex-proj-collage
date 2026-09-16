@@ -40,6 +40,13 @@ function primaryPriceScope(html: string): string {
 }
 function moneyTexts(scope: string, kind: "current" | "old"): string[] {
   const results: string[] = [];
+  if (kind === "current") {
+    for (const match of scope.matchAll(/<span\b(?=[^>]*\bclass\s*=\s*["'][^"']*(?:priceToPay|apex-pricetopay-value)[^"']*["'])[^>]*>[\s\S]{0,1200}?<span\b[^>]*\bclass\s*=\s*["'][^"']*a-price-whole[^"']*["'][^>]*>([\s\S]*?)<\/span>\s*<span\b[^>]*\bclass\s*=\s*["'][^"']*a-price-fraction[^"']*["'][^>]*>([\s\S]*?)<\/span>/gi)) {
+      const whole = text(match[1]).replace(/\D/g, "");
+      const fraction = text(match[2]).replace(/\D/g, "").padEnd(2, "0").slice(0, 2);
+      if (whole) results.push(`$${whole}.${fraction}`);
+    }
+  }
   for (const match of scope.matchAll(/<span\b([^>]*)>([\s\S]*?<span\b[^>]*class\s*=\s*["'][^"']*a-offscreen[^"']*["'][^>]*>([\s\S]*?)<\/span>[\s\S]*?)<\/span>/gi)) {
     const outer = match[1];
     const body = match[2];
