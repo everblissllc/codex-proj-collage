@@ -1,0 +1,8 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "affiliate-deal-card-amazon-feasibility",
+  "main": "pilot/amazon-feasibility-worker.ts",
+  "compatibility_date": "2026-09-12",
+  "workers_dev": true,
+  "browser": { "binding": "BROWSER" }
+}
