@@ -15,8 +15,11 @@ import type { CardCache, CacheIdentity, CacheLookup } from "../cache/types";
 import { screenshotStore } from "../stores/screenshot/registry";
 import { processScreenshotStore } from "./process-screenshot-store";
 import type { MobilePageScreenshotRenderer } from "../rendering/mobile-page-renderer";
+import { extractAmazonProduct } from "../stores/amazon/extractor";
+import { inspectAmazonHtml, usableAmazonHtml } from "../stores/amazon/diagnostics";
+import type { AmazonPageLoader } from "../stores/amazon/page-loader";
 
-export type ProcessDeps = { fetcher: FetchLike; copyProvider: CopyProvider; renderer: ScreenshotRenderer; pageRenderer?: MobilePageScreenshotRenderer; disclosure: string; requestId: string; telegramUserId?: number; dnsCheck?: DnsCheck; cardCache?: CardCache };
+export type ProcessDeps = { fetcher: FetchLike; copyProvider: CopyProvider; renderer: ScreenshotRenderer; pageRenderer?: MobilePageScreenshotRenderer; amazonPageLoader?: AmazonPageLoader; disclosure: string; requestId: string; telegramUserId?: number; dnsCheck?: DnsCheck; cardCache?: CardCache };
 export type ProcessResult = { product: ProductData; content: GeneratedContent; card: CardImage };
 
 type CacheDecision = { kind: "hit"; result: Extract<CacheLookup, { kind: "hit" }> } | { kind: "claimed"; token: string } | { kind: "bypass" };
@@ -80,7 +83,7 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
   try {
     validatePublicUrl(inputUrl);
     const directStore = detectStore(inputUrl);
-    if (directStore && directStore !== "walmart" && !screenshotStore(directStore)) throw new ProductError("UNSUPPORTED_STORE", "store", `Unsupported store: ${directStore}`);
+    if (directStore && directStore !== "walmart" && directStore !== "amazon" && !screenshotStore(directStore)) throw new ProductError("UNSUPPORTED_STORE", "store", `Unsupported store: ${directStore}`);
     const extractionStart = Date.now();
     const page = await resolveUrl(inputUrl, deps.fetcher, undefined, deps.dnsCheck);
     hostname = new URL(page.resolvedUrl).hostname;
@@ -91,6 +94,10 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
     if (directStore === "elf" && store !== "elf") {
       await page.response.body?.cancel();
       throw new ProductError("UNSAFE_SCREENSHOT_URL", "url", "Cross-store screenshot redirect rejected");
+    }
+    if (directStore === "amazon" && store !== "amazon") {
+      await page.response.body?.cancel();
+      throw new ProductError("UNSAFE_AMAZON_URL", "url", "Amazon redirect left the approved retailer domain");
     }
     if (adapter) {
       const { text: html, byteLength: responseByteLength } = await readLimitedTextWithSize(page.response);
@@ -113,22 +120,54 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
       console.log(JSON.stringify({ event: "process_complete", ...base, store, hostname, extractionDurationMs, aiDurationMs, renderDurationMs, cacheStatus: "disabled", totalDurationMs: Date.now() - started, success: true }));
       return { product, content: result.content, card: result.card };
     }
-    if (store !== "walmart") {
+    if (store !== "walmart" && store !== "amazon") {
       await page.response.body?.cancel();
       throw new ProductError("UNSUPPORTED_STORE", "store", `Unsupported store: ${store ?? "unknown"}`);
     }
-    const { text: html, byteLength: responseByteLength } = await readLimitedTextWithSize(page.response);
-    const contentTypeHeader = page.response.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
-    const contentType = contentTypeHeader && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(contentTypeHeader) ? contentTypeHeader : "unknown";
-    const diagnostics = inspectWalmartHtml(html, page.resolvedUrl);
-    console.log(JSON.stringify({
-      event: "walmart_extraction_diagnostics", ...base,
-      httpStatus: page.response.status, contentType, responseByteLength, htmlLength: html.length,
-      hostname, redirectCount: page.redirectCount, ...diagnostics
-    }));
-    const product = extractWalmartProduct(html, inputUrl, page.resolvedUrl);
+    let product: ProductData;
+    let canonicalProductId: string | undefined;
+    if (store === "walmart") {
+      const { text: html, byteLength: responseByteLength } = await readLimitedTextWithSize(page.response);
+      const contentTypeHeader = page.response.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+      const contentType = contentTypeHeader && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(contentTypeHeader) ? contentTypeHeader : "unknown";
+      const diagnostics = inspectWalmartHtml(html, page.resolvedUrl);
+      console.log(JSON.stringify({
+        event: "walmart_extraction_diagnostics", ...base,
+        httpStatus: page.response.status, contentType, responseByteLength, htmlLength: html.length,
+        hostname, redirectCount: page.redirectCount, ...diagnostics
+      }));
+      product = extractWalmartProduct(html, inputUrl, page.resolvedUrl);
+      canonicalProductId = [diagnostics.canonicalProductId, walmartProductId(product.canonicalProductUrl ?? product.resolvedUrl)].find(usableWalmartProductId);
+    } else {
+      const initialStatus = page.response.status;
+      const initialTypeHeader = page.response.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+      const initialContentType = initialTypeHeader && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(initialTypeHeader) ? initialTypeHeader : "unknown";
+      let html = "";
+      let responseByteLength = Number(page.response.headers.get("content-length")) || 0;
+      if (page.response.ok && /(?:text\/html|application\/xhtml\+xml)/i.test(initialContentType)) {
+        const read = await readLimitedTextWithSize(page.response);
+        html = read.text;
+        responseByteLength = read.byteLength;
+      } else await page.response.body?.cancel();
+      let amazonDiagnostics = inspectAmazonHtml(html, page.resolvedUrl);
+      console.log(JSON.stringify({ event: "amazon_extraction_diagnostics", ...base, hostname, source: "worker-html", httpStatus: initialStatus, contentType: initialContentType, responseByteLength, redirectCount: page.redirectCount, ...amazonDiagnostics }));
+      let extractionUrl = page.resolvedUrl;
+      if (!usableAmazonHtml(amazonDiagnostics)) {
+        if (!deps.amazonPageLoader) throw new ProductError(amazonDiagnostics.challengeDetected ? "AMAZON_CHALLENGE" : "AMAZON_PAGE_UNUSABLE", "extraction", "Amazon Worker response was not a usable product page");
+        const browserPage = await deps.amazonPageLoader.load(page.resolvedUrl, deps.requestId);
+        html = browserPage.html;
+        extractionUrl = browserPage.resolvedUrl;
+        hostname = new URL(extractionUrl).hostname;
+        amazonDiagnostics = inspectAmazonHtml(html, extractionUrl);
+        console.log(JSON.stringify({ event: "amazon_extraction_diagnostics", ...base, hostname, source: "browser-content", httpStatus: browserPage.httpStatus, contentType: "text/html", responseByteLength: browserPage.responseByteLength, redirectCount: browserPage.redirectCount, ...amazonDiagnostics }));
+        if (!usableAmazonHtml(amazonDiagnostics)) throw new ProductError(amazonDiagnostics.challengeDetected ? "AMAZON_CHALLENGE" : "AMAZON_PAGE_UNUSABLE", "extraction", "Amazon Browser response was not a usable product page");
+      }
+      const amazon = extractAmazonProduct(html, inputUrl, extractionUrl);
+      product = amazon.product;
+      canonicalProductId = amazon.asin;
+      console.log(JSON.stringify({ event: "amazon_offer_selected", ...base, hostname, asin: amazon.asin, priceSource: amazon.priceSource, variantSelection: amazon.variantSelection }));
+    }
     extractionDurationMs = Date.now() - extractionStart;
-    const canonicalProductId = [diagnostics.canonicalProductId, walmartProductId(product.canonicalProductUrl ?? product.resolvedUrl)].find(usableWalmartProductId);
     console.log(JSON.stringify({ event: "extraction_complete", ...base, store, hostname, canonicalProductId, extractionDurationMs }));
     let cacheStatus: "hit" | "miss" | "disabled" = "disabled";
     let cacheHit: Extract<CacheLookup, { kind: "hit" }> | undefined;

@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["src", "pilot/amazon-pilot-worker.ts"]
+}

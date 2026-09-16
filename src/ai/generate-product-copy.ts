@@ -18,7 +18,7 @@ export async function generateProductCopy(product: ProductData, provider: CopyPr
   let correctionReason: string | undefined;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      const draft = await provider.generate(product, correctionReason);
+      const draft = await provider.generate(product.rawTitle, correctionReason);
       return {
         shortTitle: draft.shortTitle,
         facebookPost: buildFacebookPost(product, draft.shortTitle, disclosure),

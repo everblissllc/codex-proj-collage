@@ -7,6 +7,7 @@ import { processProductLink } from "../orchestration/process-product-link";
 import { TelegramApi, TelegramApiError } from "./api";
 import { workerFetch } from "../network/worker-fetch";
 import { D1R2CardCache, cardCacheTtlSeconds } from "../cache/card-cache";
+import { BrowserAmazonPageLoader } from "../stores/amazon/page-loader";
 
 export type Env = {
   TELEGRAM_BOT_TOKEN: string;
@@ -106,6 +107,7 @@ export async function processTelegramJob(job: TelegramJob, env: Env): Promise<vo
       copyProvider: new WorkersAICopyProvider(env.AI, env.AI_TEXT_MODEL),
       renderer: new BrowserScreenshotRenderer(env.BROWSER),
       pageRenderer: new BrowserMobilePageRenderer(env.BROWSER),
+      amazonPageLoader: new BrowserAmazonPageLoader(env.BROWSER),
       disclosure: env.AFFILIATE_DISCLOSURE || "#Ad",
       requestId,
       telegramUserId,
