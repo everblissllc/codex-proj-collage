@@ -53,7 +53,7 @@ jobs:
           done
           test "$ready" = true
           curl --fail --silent --show-error --max-time 180 \
-            "${{ steps.deploy.outputs.worker_url }}/pilot" > /tmp/amazon-pilot-result.json
+            "${{ steps.deploy.outputs.worker_url }}/" > /tmp/amazon-pilot-result.json
           node - <<'NODE'
           const fs = require("node:fs");
           const result = JSON.parse(fs.readFileSync("/tmp/amazon-pilot-result.json", "utf8"));
