@@ -41,4 +41,9 @@ jobs:
           ' "$response"
       - name: Delete isolated feasibility Worker
         if: always()
-        run: npx wrangler delete affiliate-deal-card-amazon-feasibility --force
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --request DELETE \
+            --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/affiliate-deal-card-amazon-feasibility"
