@@ -54,11 +54,11 @@ jobs:
           test "$ready" = true
           pilot_status=$(curl --silent --show-error --max-time 180 --output /tmp/amazon-pilot-result.json --write-out '%{http_code}' \
             "${{ steps.deploy.outputs.worker_url }}/")
-          node - <<'NODE'
+          PILOT_HTTP_STATUS="$pilot_status" node - <<'NODE'
           const fs = require("node:fs");
           let result;
           try { result = JSON.parse(fs.readFileSync("/tmp/amazon-pilot-result.json", "utf8")); }
-          catch { console.error(JSON.stringify({ event: "amazon_pilot_failed", code: "NON_JSON_RESPONSE" })); process.exit(1); }
+          catch { console.error(JSON.stringify({ event: "amazon_pilot_failed", code: "NON_JSON_RESPONSE", httpStatus: Number(process.env.PILOT_HTTP_STATUS) })); process.exit(1); }
           if (result.error) {
             console.error(JSON.stringify({ event: "amazon_pilot_failed", ...result.error }));
             process.exit(1);
