@@ -25,6 +25,26 @@ export type SovrnReferenceClassification =
   | "inconsistent"
   | "invalid_or_absent";
 
+export type SovrnVariantClassification =
+  | "EXACT_VARIANT_MATCH"
+  | "NO_VARIANT_CONFLICT"
+  | "VARIANT_CONFLICT"
+  | "VARIANT_AMBIGUOUS_HIGH_RISK";
+
+export type SovrnVariantEvidence = {
+  explicit: boolean;
+  multiVariantFamily?: boolean;
+  size?: string;
+  shade?: string;
+  color?: string;
+  pack?: string;
+  container?: string;
+  variantId?: string;
+  sku?: string;
+  upc?: string;
+  gtin?: string;
+};
+
 export function classifySovrnReferencePrice(salePrice?: number, retailPrice?: number): SovrnReferenceClassification {
   if (!Number.isFinite(salePrice) || (salePrice ?? 0) <= 0 || !Number.isFinite(retailPrice) || (retailPrice ?? 0) <= 0) {
     return "invalid_or_absent";
@@ -34,16 +54,44 @@ export function classifySovrnReferencePrice(salePrice?: number, retailPrice?: nu
   return "inconsistent";
 }
 
+const normalizedVariantValue = (value: string): string => value.trim().toLowerCase()
+  .replace(/fluid ounces?|fl\.?\s*oz\.?/g, "floz")
+  .replace(/ounces?|oz\.?/g, "oz")
+  .replace(/millilit(?:er|re)s?|ml/g, "ml")
+  .replace(/[^a-z0-9.]+/g, "");
+
+export function classifySovrnVariantMatch(
+  source: SovrnVariantEvidence,
+  offer: SovrnVariantEvidence
+): SovrnVariantClassification {
+  const comparable: Array<keyof Omit<SovrnVariantEvidence, "explicit" | "multiVariantFamily">> = [
+    "size", "shade", "color", "pack", "container", "variantId", "sku", "upc", "gtin"
+  ];
+  let matchedEvidence = false;
+  for (const key of comparable) {
+    const sourceValue = source[key];
+    const offerValue = offer[key];
+    if (typeof sourceValue !== "string" || typeof offerValue !== "string") continue;
+    if (normalizedVariantValue(sourceValue) !== normalizedVariantValue(offerValue)) return "VARIANT_CONFLICT";
+    matchedEvidence = true;
+  }
+  if (source.explicit && offer.explicit && matchedEvidence) return "EXACT_VARIANT_MATCH";
+  if (source.multiVariantFamily === true && !source.explicit && offer.explicit) return "VARIANT_AMBIGUOUS_HIGH_RISK";
+  return "NO_VARIANT_CONFLICT";
+}
+
 export function isSovrnOfferPotentiallyUsable(input: {
   sameRetailer: boolean;
   affiliatable?: boolean;
-  exactIdentityConfirmed: boolean;
+  productMatchConfirmed: boolean;
+  variantClassification: SovrnVariantClassification;
   salePrice?: number;
   currency?: string;
   imagePresent: boolean;
   imageHttps?: boolean;
 }): boolean {
-  return input.sameRetailer && input.affiliatable === true && input.exactIdentityConfirmed &&
+  const variantAccepted = input.variantClassification === "EXACT_VARIANT_MATCH" || input.variantClassification === "NO_VARIANT_CONFLICT";
+  return input.sameRetailer && input.affiliatable === true && input.productMatchConfirmed && variantAccepted &&
     Number.isFinite(input.salePrice) && input.salePrice! > 0 && input.currency === "USD" &&
     input.imagePresent && input.imageHttps === true;
 }
@@ -70,7 +118,10 @@ function matchingIdentity(offer: SovrnPilotOfferSummary, lookupIdentity?: string
   return offer.strongerIdentityFields.some(field => normalizedIdentity(field.value) === expected);
 }
 
-export function summarizeSovrnPilotLookup(result: SovrnPilotLookupResult): Record<string, unknown> {
+export function summarizeSovrnPilotLookup(
+  result: SovrnPilotLookupResult,
+  assessment?: { productMatchConfirmed: boolean; variantClassification: SovrnVariantClassification }
+): Record<string, unknown> {
   if (!result.structure) return result;
   const offers = result.structure.offers;
   const sameRetailerOffers = offers.filter(offer => merchantMatchesStore(result.store, { name: offer.merchant.name }));
@@ -82,10 +133,14 @@ export function summarizeSovrnPilotLookup(result: SovrnPilotLookupResult): Recor
   const referencePriceClassification = representative
     ? classifySovrnReferencePrice(representative.salePrice, representative.retailPrice)
     : "invalid_or_absent";
+  const resolvedAssessment = assessment ?? (identityConfidence === "confirmed"
+    ? { productMatchConfirmed: true, variantClassification: "NO_VARIANT_CONFLICT" as const }
+    : { productMatchConfirmed: false, variantClassification: "NO_VARIANT_CONFLICT" as const });
   const technicalUsability = representative ? isSovrnOfferPotentiallyUsable({
     sameRetailer: true,
     affiliatable: representative.affiliatable,
-    exactIdentityConfirmed: identityConfidence === "confirmed",
+    productMatchConfirmed: resolvedAssessment.productMatchConfirmed,
+    variantClassification: resolvedAssessment.variantClassification,
     salePrice: representative.salePrice,
     currency: representative.currency,
     imagePresent: representative.image.present,
@@ -102,6 +157,7 @@ export function summarizeSovrnPilotLookup(result: SovrnPilotLookupResult): Recor
     sameRetailerOfferCount: sameRetailerOffers.length,
     sameRetailerOffer: representative,
     identityConfidence,
+    variantClassification: resolvedAssessment.variantClassification,
     referencePriceClassification,
     technicalUsability
   };

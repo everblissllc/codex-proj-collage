@@ -7,7 +7,7 @@ const req = relative => require(path.join(root, relative));
 
 const { ProductError } = req("types.js");
 const { SovrnClient } = req("stores/sovrn/client.js");
-const { classifySovrnReferencePrice, isSovrnOfferPotentiallyUsable, parseSovrnPilotCandidates, runSovrnPilotLookups, summarizeSovrnPilotLookup } = req("stores/sovrn/feasibility.js");
+const { classifySovrnReferencePrice, classifySovrnVariantMatch, isSovrnOfferPotentiallyUsable, parseSovrnPilotCandidates, runSovrnPilotLookups, summarizeSovrnPilotLookup } = req("stores/sovrn/feasibility.js");
 const { merchantMatchesStore, sovrnStoreForHostname } = req("stores/sovrn/merchant-registry.js");
 const { buildSovrnPlainlink } = req("stores/sovrn/plainlink.js");
 const { mapSovrnProduct, buildSovrnFacebookPost } = req("stores/sovrn/product-mapper.js");
@@ -223,15 +223,113 @@ test("direct pilot summary requires strong identity and never substitutes anothe
 });
 
 test("feasibility rejects non-affiliatable or identity-ambiguous offers and classifies references safely", () => {
-  const valid = { sameRetailer: true, affiliatable: true, exactIdentityConfirmed: true, salePrice: 10, currency: "USD", imagePresent: true, imageHttps: true };
+  const valid = {
+    sameRetailer: true, affiliatable: true, productMatchConfirmed: true,
+    variantClassification: "NO_VARIANT_CONFLICT", salePrice: 10, currency: "USD", imagePresent: true, imageHttps: true
+  };
   assert.equal(isSovrnOfferPotentiallyUsable(valid), true);
   assert.equal(isSovrnOfferPotentiallyUsable({ ...valid, affiliatable: false }), false);
-  assert.equal(isSovrnOfferPotentiallyUsable({ ...valid, exactIdentityConfirmed: false }), false);
+  assert.equal(isSovrnOfferPotentiallyUsable({ ...valid, productMatchConfirmed: false }), false);
+  assert.equal(isSovrnOfferPotentiallyUsable({ ...valid, variantClassification: "VARIANT_CONFLICT" }), false);
+  assert.equal(isSovrnOfferPotentiallyUsable({ ...valid, variantClassification: "VARIANT_AMBIGUOUS_HIGH_RISK" }), false);
   assert.equal(classifySovrnReferencePrice(10, 15), "valid_reference_candidate");
   assert.equal(classifySovrnReferencePrice(10, 10), "equal_no_discount");
   assert.equal(classifySovrnReferencePrice(10, 9), "inconsistent");
   assert.equal(classifySovrnReferencePrice(10, 0), "invalid_or_absent");
   assert.equal(classifySovrnReferencePrice(10, undefined), "invalid_or_absent");
+});
+
+test("strong identifier absence alone accepts the same product when no variant evidence conflicts", () => {
+  assert.equal(
+    classifySovrnVariantMatch({ explicit: true, size: "0.811 oz" }, { explicit: false }),
+    "NO_VARIANT_CONFLICT"
+  );
+  assert.equal(isSovrnOfferPotentiallyUsable({
+    sameRetailer: true,
+    affiliatable: true,
+    productMatchConfirmed: true,
+    variantClassification: "NO_VARIANT_CONFLICT",
+    salePrice: 11,
+    currency: "USD",
+    imagePresent: true,
+    imageHttps: true
+  }), true);
+  const summary = summarizeSovrnPilotLookup({
+    store: "ulta",
+    httpStatus: 200,
+    lookupIdentity: "pimprod2030073",
+    structure: describeSovrnPriceResponse([{
+      merchant: { name: "Ulta", id: 4400 }, name: "e.l.f. Cosmetics Power Grip Primer", id: 8095851927,
+      salePrice: 11, retailPrice: 11, currency: "USD", affiliatable: true,
+      image: "https://media.ulta.com/product.jpg"
+    }])
+  }, { productMatchConfirmed: true, variantClassification: "NO_VARIANT_CONFLICT" });
+  assert.equal(summary.identityConfidence, "ambiguous");
+  assert.equal(summary.variantClassification, "NO_VARIANT_CONFLICT");
+  assert.equal(summary.technicalUsability, true);
+});
+
+test("matching explicit variant evidence is exact while explicit size or shade contradictions conflict", () => {
+  assert.equal(classifySovrnVariantMatch(
+    { explicit: true, size: "1 fl oz", sku: "ABC" },
+    { explicit: true, size: "1 fluid ounce", sku: "abc" }
+  ), "EXACT_VARIANT_MATCH");
+  assert.equal(classifySovrnVariantMatch(
+    { explicit: true, size: "3 fl oz" },
+    { explicit: true, size: "16 fl oz" }
+  ), "VARIANT_CONFLICT");
+  assert.equal(classifySovrnVariantMatch(
+    { explicit: true, shade: "Adore" },
+    { explicit: true, shade: "Encourage" }
+  ), "VARIANT_CONFLICT");
+});
+
+test("generic multi-variant source plus a Sovrn-specific variant is high risk", () => {
+  assert.equal(classifySovrnVariantMatch(
+    { explicit: false, multiVariantFamily: true },
+    { explicit: true, size: "8 oz", container: "Jar" }
+  ), "VARIANT_AMBIGUOUS_HIGH_RISK");
+});
+
+test("current retailer evidence follows deterministic conflict policy", () => {
+  const current = {
+    target: classifySovrnVariantMatch(
+      { explicit: true, multiVariantFamily: true, size: "3 fl oz" },
+      { explicit: true, size: "16 fl oz" }
+    ),
+    nordstrom: classifySovrnVariantMatch(
+      { explicit: false, multiVariantFamily: true },
+      { explicit: true, size: "8 oz", container: "Jar" }
+    ),
+    ulta: classifySovrnVariantMatch(
+      { explicit: true, size: "0.811 oz", sku: "2591795" },
+      { explicit: false }
+    ),
+    sephora: classifySovrnVariantMatch(
+      { explicit: true, multiVariantFamily: true, shade: "Adore" },
+      { explicit: true, shade: "Encourage" }
+    ),
+    ecosmetics: classifySovrnVariantMatch(
+      { explicit: true, multiVariantFamily: true, size: "1 oz", variantId: "4815708", sku: "31042143" },
+      { explicit: false }
+    )
+  };
+  assert.deepEqual(current, {
+    target: "VARIANT_CONFLICT",
+    nordstrom: "VARIANT_AMBIGUOUS_HIGH_RISK",
+    ulta: "NO_VARIANT_CONFLICT",
+    sephora: "VARIANT_CONFLICT",
+    ecosmetics: "NO_VARIANT_CONFLICT"
+  });
+  const offer = {
+    sameRetailer: true, affiliatable: true, productMatchConfirmed: true,
+    salePrice: 10, currency: "USD", imagePresent: true, imageHttps: true
+  };
+  assert.equal(isSovrnOfferPotentiallyUsable({ ...offer, variantClassification: current.target }), false);
+  assert.equal(isSovrnOfferPotentiallyUsable({ ...offer, variantClassification: current.nordstrom }), false);
+  assert.equal(isSovrnOfferPotentiallyUsable({ ...offer, variantClassification: current.ulta }), true);
+  assert.equal(isSovrnOfferPotentiallyUsable({ ...offer, variantClassification: current.sephora }), false);
+  assert.equal(isSovrnOfferPotentiallyUsable({ ...offer, variantClassification: current.ecosmetics }), true);
 });
 
 test("eCosmetics live response shape is retailer-matched and zero retailPrice is not a reference price", () => {

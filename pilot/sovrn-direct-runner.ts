@@ -72,7 +72,7 @@ async function main(): Promise<void> {
     success: true,
     market: "usd_en",
     merchants,
-    results: lookups.map(summarizeSovrnPilotLookup),
+    results: lookups.map(result => summarizeSovrnPilotLookup(result)),
     sourceIdentities
   }));
 }
