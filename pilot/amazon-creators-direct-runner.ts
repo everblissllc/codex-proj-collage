@@ -58,7 +58,7 @@ function apiError(payload: Record<string, unknown> | undefined): CreatorsApiErro
   if (!payload) return undefined;
   const errors = payload.errors;
   if (Array.isArray(errors) && errors[0] && typeof errors[0] === "object") return errors[0] as CreatorsApiError;
-  return payload as CreatorsApiError;
+  return undefined;
 }
 
 function items(payload: Record<string, unknown>): CreatorsItem[] {

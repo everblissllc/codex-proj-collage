@@ -3,5 +3,5 @@
   "compilerOptions": {
     "types": ["@cloudflare/workers-types", "node"]
   },
-  "include": ["src", "pilot/amazon-creators-direct-runner.ts"]
+  "include": ["src", "pilot/amazon-creators-direct-runner.ts", "test/amazon-creators-direct-runner.node.test.ts"]
 }

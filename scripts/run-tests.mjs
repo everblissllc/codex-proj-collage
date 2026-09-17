@@ -10,4 +10,12 @@ const result = spawnSync(process.execPath, ["--test", "test/product.node.test.cj
   stdio: "inherit",
   env: { ...process.env, COMPILED_ROOT: out }
 });
-process.exitCode = result.status ?? 1;
+if ((result.status ?? 1) !== 0) {
+  process.exitCode = result.status ?? 1;
+} else {
+  const pilotOut = mkdtempSync(join(tmpdir(), "amazon-creators-pilot-tests-"));
+  execFileSync("./node_modules/.bin/tsc", ["-p", "tsconfig.amazon-creators-pilot.json", "--noEmit", "false", "--outDir", pilotOut], { stdio: "inherit" });
+  writeFileSync(join(pilotOut, "package.json"), '{"type":"module"}');
+  const pilotResult = spawnSync(process.execPath, ["--test", join(pilotOut, "test/amazon-creators-direct-runner.node.test.js")], { stdio: "inherit" });
+  process.exitCode = pilotResult.status ?? 1;
+}
