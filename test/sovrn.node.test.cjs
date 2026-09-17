@@ -1,5 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { spawnSync } = require("node:child_process");
+const { mkdtempSync, writeFileSync } = require("node:fs");
+const { tmpdir } = require("node:os");
 const path = require("node:path");
 const root = process.env.COMPILED_ROOT;
 const req = relative => require(path.join(root, relative));
@@ -25,6 +28,15 @@ const map = (offers, overrides = {}) => mapSovrnProduct({
   productIdentity: "12345678", offers, ...overrides
 });
 const expectCode = (fn, code) => assert.throws(fn, error => error instanceof ProductError && error.code === code);
+const runPilotReporter = (script, status, body, attempt) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "sovrn-reporter-"));
+  const responsePath = path.join(directory, "response.txt");
+  writeFileSync(responsePath, body);
+  const args = [path.join(process.cwd(), "pilot", script)];
+  if (attempt !== undefined) args.push(String(status), String(attempt), responsePath);
+  else args.push(responsePath, String(status));
+  return spawnSync(process.execPath, args, { encoding: "utf8" });
+};
 
 test("Sovrn candidate domains use exact/subdomain matching and reject lookalikes", () => {
   const cases = [
@@ -186,6 +198,32 @@ test("price response discovery exposes exact safe offer fields but never deeplin
   assert.equal(summary.offers[0].strongerIdentityFields[0].value, "0012345678905");
   const serialized = JSON.stringify(summary);
   assert.doesNotMatch(serialized, /redirect\.viglink|secret=hidden|item\.jpg|thumb\.jpg/);
+});
+
+test("readiness reporter retries route propagation and approved 503 bootstrap states only", () => {
+  const route = runPilotReporter("report-sovrn-bootstrap.mjs", 404, "raw-secret-body", 1);
+  assert.equal(route.status, 10);
+  assert.deepEqual(JSON.parse(route.stdout), {
+    event: "sovrn_pilot_bootstrap", attempt: 1, httpStatus: 404, ready: false, errorCode: "PILOT_ROUTE_NOT_READY"
+  });
+  const bootstrap = runPilotReporter("report-sovrn-bootstrap.mjs", 503,
+    '{"errorCode":"PILOT_BOOTSTRAP_NOT_READY","missingKeys":["PILOT_RUN_SECRET"]}', 2);
+  assert.equal(bootstrap.status, 10);
+  const unexpected = runPilotReporter("report-sovrn-bootstrap.mjs", 500, "raw-secret-body", 3);
+  assert.equal(unexpected.status, 2);
+  assert.equal(JSON.parse(unexpected.stdout).errorCode, "PILOT_HTTP_ERROR");
+  const output = route.stdout + route.stderr + bootstrap.stdout + bootstrap.stderr + unexpected.stdout + unexpected.stderr;
+  assert.doesNotMatch(output, /raw-secret-body/);
+});
+
+test("final pilot reporter never retries or emits a raw HTTP 404 body", () => {
+  const result = runPilotReporter("report-sovrn-feasibility.mjs", 404, "raw-pilot-secret-body");
+  assert.equal(result.status, 2);
+  assert.equal(result.stdout, "");
+  assert.deepEqual(JSON.parse(result.stderr), {
+    event: "sovrn_pilot_failed", success: false, httpStatus: 404, errorCode: "PILOT_RESPONSE_INVALID"
+  });
+  assert.doesNotMatch(result.stdout + result.stderr, /raw-pilot-secret-body/);
 });
 
 test("approved merchant discovery uses presence in the official collection without exposing raw rows", () => {
