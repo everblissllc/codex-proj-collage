@@ -142,8 +142,11 @@ function base64(bytes: Uint8Array): string {
 
 async function runPilot(env: Env) {
   const products = [
-    { label: "worker-primary", inputUrl: "https://www.amazon.com/dp/B07HYXJ8Z7?ref_=amazon_pilot_a" },
-    { label: "fallback-candidate", inputUrl: "https://www.amazon.com/dp/B08HNBHSQV?ref_=amazon_pilot_reference" }
+    { label: "instant-pot", inputUrl: "https://www.amazon.com/dp/B00FLYWNYQ?th=1&psc=1&ref_=amazon_pilot_a" },
+    { label: "bounty", inputUrl: "https://www.amazon.com/dp/B07MHJFRBJ?th=1&psc=1&ref_=amazon_pilot_b" },
+    { label: "current-deal-one", inputUrl: "https://www.amazon.com/dp/B0H6W47Y87?th=1&psc=1&ref_=amazon_pilot_c" },
+    { label: "current-deal-two", inputUrl: "https://www.amazon.com/dp/B0B4NWBLYJ?th=1&psc=1&ref_=amazon_pilot_d" },
+    { label: "fallback-reference", inputUrl: "https://www.amazon.com/dp/B08HNBHSQV?th=1&psc=1&ref_=amazon_pilot_e" }
   ] as const;
   const browserObservation: BrowserObservation = { contentCalls: 0, screenshotCalls: 0 };
   const browser = instrumentedBrowser(env, browserObservation);
@@ -197,6 +200,8 @@ async function runPilot(env: Env) {
       });
       successful.push({ inputUrl: product.inputUrl, asin, cacheKeyPrefix: identity.keyPrefix });
       cards.push({ bytes: result.card.bytes, hasOldPrice: Boolean(result.product.oldPrice) });
+      const successfulReports = reports.filter(report => report.success);
+      if (successfulReports.some(report => !report.browserFallbackUsed) && successfulReports.some(report => report.browserFallbackUsed)) break;
     } catch (error) {
       const failure = error as { code?: unknown; stage?: unknown };
       const fallbackUsed = browserObservation.contentCalls > contentBefore;
@@ -246,13 +251,15 @@ async function runPilot(env: Env) {
       newPostUrlPreserved: repeat.product.postUrl === repeatUrl && repeat.content.facebookPost.endsWith(repeatUrl),
       priorPostUrlAbsent: !repeat.content.facebookPost.includes(cacheSource.inputUrl),
       persistentStateContainsEitherUrl: cache.contains(cacheSource.inputUrl) || cache.contains(repeatUrl),
-      variantIdentitiesDistinct: successful.length === 2 && successful[0].cacheKeyPrefix !== successful[1].cacheKeyPrefix
+      variantIdentitiesDistinct: successful.length >= 2 && successful[0].cacheKeyPrefix !== successful[1].cacheKeyPrefix
     };
   }
 
   const selected = cards.find(card => card.hasOldPrice) ?? cards[0];
   const dimensions = selected ? pngSize(selected.bytes) : { width: 0, height: 0 };
-  const pass = successful.length === 2 && reports.every(report => report.success && report.finalHostAllowed && report.postUrlPreserved) &&
+  const successfulReports = reports.filter(report => report.success);
+  const pass = successful.length >= 2 && successfulReports.every(report => report.finalHostAllowed && report.postUrlPreserved) &&
+    successfulReports.some(report => !report.browserFallbackUsed) && successfulReports.some(report => report.browserFallbackUsed) &&
     !copy.inputHadUrl && cacheReport.hit && cacheReport.aiCallsOnHit === 0 && cacheReport.renderCallsOnHit === 0 &&
     cacheReport.browserScreenshotCallsOnHit === 0 && cacheReport.newPostUrlPreserved && cacheReport.priorPostUrlAbsent &&
     !cacheReport.persistentStateContainsEitherUrl && cacheReport.variantIdentitiesDistinct && dimensions.width === 1200 && dimensions.height === 1200;
