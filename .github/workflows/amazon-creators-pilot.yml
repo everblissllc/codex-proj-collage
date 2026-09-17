@@ -108,7 +108,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Delete isolated pilot Worker
-        if: always() && steps.deploy.outcome == 'success'
+        if: always() && steps.deploy.outcome != 'skipped'
         shell: bash
         run: |
           set -euo pipefail
