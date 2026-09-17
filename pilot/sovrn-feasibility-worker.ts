@@ -1,6 +1,6 @@
 import { SovrnApiError, SovrnClient } from "../src/stores/sovrn/client";
-import { describeSovrnPriceResponse, inspectApprovedMerchants } from "../src/stores/sovrn/response-shape";
-import { buildSovrnPlainlink } from "../src/stores/sovrn/plainlink";
+import { runSovrnPilotLookups } from "../src/stores/sovrn/feasibility";
+import { inspectApprovedMerchants } from "../src/stores/sovrn/response-shape";
 import { sovrnMerchantAdapters } from "../src/stores/sovrn/merchant-registry";
 import type { SovrnStoreId } from "../src/stores/sovrn/types";
 
@@ -10,6 +10,7 @@ type Env = {
   SOVRN_CAMPAIGN_ID?: string;
   SOVRN_MARKET?: string;
   SOVRN_PILOT_PLAINLINKS_JSON?: string;
+  SOVRN_PILOT_BUILD_ID?: string;
   PILOT_RUN_SECRET?: string;
 };
 
@@ -21,7 +22,7 @@ function secureEqual(actual: string | null, expected?: string): boolean {
 }
 
 function configured(env: Env): string[] {
-  return ["SOVRN_SECRET_KEY", "SOVRN_SITE_API_KEY", "SOVRN_CAMPAIGN_ID", "SOVRN_MARKET", "SOVRN_PILOT_PLAINLINKS_JSON", "PILOT_RUN_SECRET"]
+  return ["SOVRN_SECRET_KEY", "SOVRN_SITE_API_KEY", "SOVRN_CAMPAIGN_ID", "SOVRN_MARKET", "SOVRN_PILOT_PLAINLINKS_JSON", "SOVRN_PILOT_BUILD_ID", "PILOT_RUN_SECRET"]
     .filter(key => !env[key as keyof Env]);
 }
 
@@ -66,7 +67,7 @@ export default {
     if (!isReady && !isPilot) return new Response("Not found", { status: 404 });
     const bootstrap = validateBootstrap(request, env);
     if (bootstrap.response) return bootstrap.response;
-    if (isReady) return Response.json({ success: true, ready: true });
+    if (isReady) return Response.json({ success: true, ready: true, buildId: env.SOVRN_PILOT_BUILD_ID });
     const candidates = bootstrap.candidates!;
     const client = new SovrnClient({
       secretKey: env.SOVRN_SECRET_KEY!, siteApiKey: env.SOVRN_SITE_API_KEY!, market: "usd_en", campaignId: env.SOVRN_CAMPAIGN_ID!
@@ -87,27 +88,10 @@ export default {
           errorCode: error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "SOVRN_PILOT_FAILED"
         };
       }
-      const results = [];
-      for (const [index, candidate] of candidates.entries()) {
-        try {
-          const lookup = buildSovrnPlainlink(candidate.url, candidate.store);
-          const domain = sovrnMerchantAdapters[candidate.store].domains[0];
-          const approvedMetadata = merchantFindings.find(finding => finding.domain === domain)?.approved === true;
-          const response = await client.compareByPlainlinkDetailed({ plainlink: lookup.plainlink, store: candidate.store, requestId: "sovrn-feasibility" });
-          results.push({
-            store: candidate.store, hostname: new URL(lookup.plainlink).hostname, approvedMetadata, httpStatus: response.httpStatus,
-            pathShape: new URL(lookup.plainlink).pathname.replace(/[A-Za-z0-9]{6,}/g, ":id"),
-            productIdentityPresent: Boolean(lookup.productIdentity), structure: describeSovrnPriceResponse(response.value)
-          });
-        } catch (error) {
-          results.push({
-            store: candidate.store,
-            httpStatus: error instanceof SovrnApiError ? error.httpStatus : undefined,
-            errorCode: error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "SOVRN_PILOT_FAILED"
-          });
-        }
-        if (index < candidates.length - 1) await new Promise(resolve => setTimeout(resolve, 250));
-      }
+      const results = await runSovrnPilotLookups({
+        candidates, merchantFindings,
+        compare: input => client.compareByPlainlinkDetailed(input)
+      });
       return Response.json({ success: true, source: "sovrn-price-comparison", market: "usd_en", merchants, results });
     } catch (error) {
       const productError = error && typeof error === "object" && "code" in error ? error as { code?: unknown } : undefined;

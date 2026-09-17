@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
-const { mkdtempSync, writeFileSync } = require("node:fs");
+const { mkdtempSync, readFileSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const path = require("node:path");
 const root = process.env.COMPILED_ROOT;
@@ -9,7 +9,8 @@ const req = relative => require(path.join(root, relative));
 
 const { ProductError } = req("types.js");
 const { SovrnClient } = req("stores/sovrn/client.js");
-const { sovrnStoreForHostname } = req("stores/sovrn/merchant-registry.js");
+const { classifySovrnReferencePrice, isSovrnOfferPotentiallyUsable, runSovrnPilotLookups } = req("stores/sovrn/feasibility.js");
+const { merchantMatchesStore, sovrnStoreForHostname } = req("stores/sovrn/merchant-registry.js");
 const { buildSovrnPlainlink } = req("stores/sovrn/plainlink.js");
 const { mapSovrnProduct, buildSovrnFacebookPost } = req("stores/sovrn/product-mapper.js");
 const { describeSovrnPriceResponse, describeSovrnResponse, inspectApprovedMerchants } = req("stores/sovrn/response-shape.js");
@@ -28,12 +29,12 @@ const map = (offers, overrides = {}) => mapSovrnProduct({
   productIdentity: "12345678", offers, ...overrides
 });
 const expectCode = (fn, code) => assert.throws(fn, error => error instanceof ProductError && error.code === code);
-const runPilotReporter = (script, status, body, attempt) => {
+const runPilotReporter = (script, status, body, attempt, expectedBuildId = "build-123", consecutiveSuccesses = 0) => {
   const directory = mkdtempSync(path.join(tmpdir(), "sovrn-reporter-"));
   const responsePath = path.join(directory, "response.txt");
   writeFileSync(responsePath, body);
   const args = [path.join(process.cwd(), "pilot", script)];
-  if (attempt !== undefined) args.push(String(status), String(attempt), responsePath);
+  if (attempt !== undefined) args.push(String(status), String(attempt), responsePath, expectedBuildId, String(consecutiveSuccesses));
   else args.push(responsePath, String(status));
   return spawnSync(process.execPath, args, { encoding: "utf8" });
 };
@@ -101,10 +102,78 @@ test("client stops after two 429s and classifies timeout", async () => {
   await assert.rejects(() => timed.compareByPlainlink({ plainlink: "https://www.target.com/p/item/-/A-12345678", store: "target" }), error => error.code === "SOVRN_TIMEOUT");
 });
 
+test("client does not retry a non-rate-limit Sovrn API failure", async () => {
+  let calls = 0;
+  const client = new SovrnClient(config, async () => {
+    calls++;
+    return new Response("untrusted response body", { status: 500 });
+  });
+  await assert.rejects(
+    () => client.compareByPlainlink({ plainlink: "https://www.target.com/p/item/-/A-12345678", store: "target" }),
+    error => error.code === "SOVRN_API_ERROR" && error.httpStatus === 500
+  );
+  assert.equal(calls, 1);
+});
+
 test("source merchant is selected and cheaper alternative merchant is never substituted", () => {
   const result = map([baseOffer(), baseOffer({ merchantName: "Walmart", merchantDomain: "walmart.com", currentPrice: money(1) })]);
   assert.equal(result.product.currentPrice.value, 12.99);
   expectCode(() => map([baseOffer({ merchantName: "Walmart", merchantDomain: "walmart.com" })]), "SOVRN_MERCHANT_MISMATCH");
+});
+
+test("same-retailer matching and cheaper-offer rejection apply uniformly to all Sovrn stores", () => {
+  const cases = [
+    ["target", "Target", "12345678", "https://www.target.com/p/item/-/A-12345678"],
+    ["nordstrom", "Nordstrom", "5151632", "https://www.nordstrom.com/s/item/5151632"],
+    ["ulta", "Ulta", "pimprod1234", "https://www.ulta.com/p/item-pimprod1234"],
+    ["sephora", "Sephora", "P12345", "https://www.sephora.com/product/item-P12345"],
+    ["ecosmetics", "eCosmetics", "item", "https://www.ecosmetics.com/product/item"],
+    ["bubble", "Bubble", "item", "https://hellobubble.com/products/item"]
+  ];
+  for (const [store, merchantName, identity, plainlink] of cases) {
+    assert.equal(merchantMatchesStore(store, { name: merchantName }), true, store);
+    const primary = baseOffer({ merchantName, merchantDomain: undefined, identity: { merchantProductId: identity }, currentPrice: money(20) });
+    const cheaper = baseOffer({ merchantName: "Other Merchant", merchantDomain: "other.example", identity: { merchantProductId: identity }, currentPrice: money(1) });
+    const result = mapSovrnProduct({
+      store, postUrl: `${plainlink}?affiliate=original`, resolvedUrl: plainlink,
+      plainlink, productIdentity: identity, offers: [primary, cheaper]
+    });
+    assert.equal(result.product.currentPrice.value, 20, store);
+  }
+});
+
+test("Approved Merchants absence never blocks one sequential Price Comparison call per configured retailer", async () => {
+  const candidates = [
+    ["target", "https://www.target.com/p/item/-/A-12345678"],
+    ["nordstrom", "https://www.nordstrom.com/s/item/5151632"],
+    ["ulta", "https://www.ulta.com/p/item-pimprod1234"],
+    ["sephora", "https://www.sephora.com/product/item-P12345"],
+    ["ecosmetics", "https://www.ecosmetics.com/product/item"],
+    ["bubble", "https://hellobubble.com/products/item"]
+  ].map(([store, url]) => ({ store, url }));
+  const calls = [];
+  const waits = [];
+  const results = await runSovrnPilotLookups({
+    candidates, merchantFindings: [],
+    compare: async input => { calls.push(input.store); return { httpStatus: 200, value: [] }; },
+    delay: async ms => { waits.push(ms); }
+  });
+  assert.deepEqual(calls, ["target", "nordstrom", "ulta", "sephora", "ecosmetics", "bubble"]);
+  assert.deepEqual(waits, [250, 250, 250, 250, 250]);
+  assert.equal(results.length, 6);
+  assert.ok(results.every(result => result.approvedMetadata === false && result.httpStatus === 200));
+});
+
+test("feasibility rejects non-affiliatable or identity-ambiguous offers and classifies references safely", () => {
+  const valid = { sameRetailer: true, affiliatable: true, exactIdentityConfirmed: true, salePrice: 10, currency: "USD", imagePresent: true, imageHttps: true };
+  assert.equal(isSovrnOfferPotentiallyUsable(valid), true);
+  assert.equal(isSovrnOfferPotentiallyUsable({ ...valid, affiliatable: false }), false);
+  assert.equal(isSovrnOfferPotentiallyUsable({ ...valid, exactIdentityConfirmed: false }), false);
+  assert.equal(classifySovrnReferencePrice(10, 15), "valid_reference_candidate");
+  assert.equal(classifySovrnReferencePrice(10, 10), "equal_no_discount");
+  assert.equal(classifySovrnReferencePrice(10, 9), "inconsistent");
+  assert.equal(classifySovrnReferencePrice(10, 0), "invalid_or_absent");
+  assert.equal(classifySovrnReferencePrice(10, undefined), "invalid_or_absent");
 });
 
 test("exact product mismatch and ambiguous source offers fail safely", () => {
@@ -204,16 +273,50 @@ test("readiness reporter retries route propagation and approved 503 bootstrap st
   const route = runPilotReporter("report-sovrn-bootstrap.mjs", 404, "raw-secret-body", 1);
   assert.equal(route.status, 10);
   assert.deepEqual(JSON.parse(route.stdout), {
-    event: "sovrn_pilot_bootstrap", attempt: 1, httpStatus: 404, ready: false, errorCode: "PILOT_ROUTE_NOT_READY"
+    event: "sovrn_pilot_bootstrap", attempt: 1, httpStatus: 404, ready: false, errorCode: "PILOT_ROUTE_NOT_READY",
+    consecutiveSuccesses: 0, expectedBuildShort: "build-12"
   });
   const bootstrap = runPilotReporter("report-sovrn-bootstrap.mjs", 503,
     '{"errorCode":"PILOT_BOOTSTRAP_NOT_READY","missingKeys":["PILOT_RUN_SECRET"]}', 2);
   assert.equal(bootstrap.status, 10);
+  const expectedConfig = runPilotReporter("report-sovrn-bootstrap.mjs", 503,
+    '{"errorCode":"PILOT_CONFIG_MISSING","missingKeys":["SOVRN_PILOT_BUILD_ID"]}', 3);
+  assert.equal(expectedConfig.status, 10);
+  const unexpectedConfig = runPilotReporter("report-sovrn-bootstrap.mjs", 503,
+    '{"errorCode":"PILOT_CONFIG_MISSING","missingKeys":["UNAPPROVED_KEY"]}', 4);
+  assert.equal(unexpectedConfig.status, 2);
   const unexpected = runPilotReporter("report-sovrn-bootstrap.mjs", 500, "raw-secret-body", 3);
   assert.equal(unexpected.status, 2);
   assert.equal(JSON.parse(unexpected.stdout).errorCode, "PILOT_HTTP_ERROR");
-  const output = route.stdout + route.stderr + bootstrap.stdout + bootstrap.stderr + unexpected.stdout + unexpected.stderr;
+  const output = route.stdout + route.stderr + bootstrap.stdout + bootstrap.stderr + expectedConfig.stdout + expectedConfig.stderr +
+    unexpectedConfig.stdout + unexpectedConfig.stderr + unexpected.stdout + unexpected.stderr;
   assert.doesNotMatch(output, /raw-secret-body/);
+});
+
+test("readiness requires two consecutive matching build IDs and resets after retryable failure", () => {
+  const readyBody = '{"success":true,"ready":true,"buildId":"build-123"}';
+  const first = runPilotReporter("report-sovrn-bootstrap.mjs", 200, readyBody, 1, "build-123", 0);
+  assert.equal(first.status, 0);
+  assert.equal(JSON.parse(first.stdout).consecutiveSuccesses, 1);
+  const second = runPilotReporter("report-sovrn-bootstrap.mjs", 200, readyBody, 2, "build-123", 1);
+  assert.equal(second.status, 0);
+  assert.equal(JSON.parse(second.stdout).consecutiveSuccesses, 2);
+  const reset = runPilotReporter("report-sovrn-bootstrap.mjs", 404, "old route", 2, "build-123", 1);
+  assert.equal(reset.status, 10);
+  assert.equal(JSON.parse(reset.stdout).consecutiveSuccesses, 0);
+});
+
+test("readiness retries missing or wrong build IDs and fails unexpected errors", () => {
+  for (const body of [
+    '{"success":true,"ready":true}',
+    '{"success":true,"ready":true,"buildId":"wrong-build"}'
+  ]) {
+    const result = runPilotReporter("report-sovrn-bootstrap.mjs", 200, body, 1, "build-123", 0);
+    assert.equal(result.status, 10);
+    assert.equal(JSON.parse(result.stdout).errorCode, "PILOT_BUILD_NOT_READY");
+  }
+  const failure = runPilotReporter("report-sovrn-bootstrap.mjs", 401, '{"errorCode":"PILOT_UNAUTHORIZED"}', 1);
+  assert.equal(failure.status, 2);
 });
 
 test("final pilot reporter never retries or emits a raw HTTP 404 body", () => {
@@ -224,6 +327,20 @@ test("final pilot reporter never retries or emits a raw HTTP 404 body", () => {
     event: "sovrn_pilot_failed", success: false, httpStatus: 404, errorCode: "PILOT_RESPONSE_INVALID"
   });
   assert.doesNotMatch(result.stdout + result.stderr, /raw-pilot-secret-body/);
+});
+
+test("POST /pilot API failures are reported once and are never retried", () => {
+  const result = runPilotReporter("report-sovrn-feasibility.mjs", 500,
+    '{"success":false,"errorCode":"SOVRN_API_ERROR","missingKeys":["SOVRN_SECRET_KEY"]}');
+  assert.equal(result.status, 2);
+  assert.equal(result.stderr, "");
+  assert.deepEqual(JSON.parse(result.stdout), {
+    event: "sovrn_pilot_failed", success: false, httpStatus: 500, errorCode: "SOVRN_API_ERROR",
+    missingKeys: ["SOVRN_SECRET_KEY"]
+  });
+  const workflow = readFileSync(path.join(process.cwd(), ".github/workflows/sovrn-feasibility-pilot.yml"), "utf8");
+  assert.equal((workflow.match(/--request POST/g) ?? []).length, 1);
+  assert.equal((workflow.match(/\/pilot"/g) ?? []).length, 1);
 });
 
 test("approved merchant discovery uses presence in the official collection without exposing raw rows", () => {

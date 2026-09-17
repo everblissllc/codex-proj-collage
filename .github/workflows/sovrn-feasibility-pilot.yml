@@ -17,6 +17,7 @@ jobs:
       SOVRN_CAMPAIGN_ID: ${{ secrets.SOVRN_CAMPAIGN_ID }}
       SOVRN_MARKET: ${{ vars.SOVRN_MARKET }}
       SOVRN_PILOT_PLAINLINKS_JSON: ${{ vars.SOVRN_PILOT_PLAINLINKS_JSON }}
+      SOVRN_PILOT_BUILD_ID: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -29,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           missing=()
-          for key in CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN SOVRN_SECRET_KEY SOVRN_SITE_API_KEY SOVRN_CAMPAIGN_ID SOVRN_MARKET SOVRN_PILOT_PLAINLINKS_JSON; do
+          for key in CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN SOVRN_SECRET_KEY SOVRN_SITE_API_KEY SOVRN_CAMPAIGN_ID SOVRN_MARKET SOVRN_PILOT_PLAINLINKS_JSON SOVRN_PILOT_BUILD_ID; do
             if [[ -z "${!key:-}" ]]; then missing+=("$key"); fi
           done
           if (( ${#missing[@]} > 0 )); then
@@ -61,7 +62,7 @@ jobs:
           echo "::add-mask::$pilot_secret"
           export PILOT_RUN_SECRET="$pilot_secret"
           node -e '
-            const keys = ["SOVRN_SECRET_KEY", "SOVRN_SITE_API_KEY", "SOVRN_CAMPAIGN_ID", "SOVRN_MARKET", "SOVRN_PILOT_PLAINLINKS_JSON", "PILOT_RUN_SECRET"];
+            const keys = ["SOVRN_SECRET_KEY", "SOVRN_SITE_API_KEY", "SOVRN_CAMPAIGN_ID", "SOVRN_MARKET", "SOVRN_PILOT_PLAINLINKS_JSON", "SOVRN_PILOT_BUILD_ID", "PILOT_RUN_SECRET"];
             process.stdout.write(JSON.stringify(Object.fromEntries(keys.map(key => [key, process.env[key]]))));
           ' | npx wrangler secret bulk --config wrangler.sovrn-pilot.jsonc
           echo "PILOT_RUN_SECRET=$pilot_secret" >> "$GITHUB_ENV"
@@ -72,6 +73,7 @@ jobs:
           sleep 2
           ready=false
           attempts_used=0
+          consecutive_successes=0
           for attempt in $(seq 1 10); do
             attempts_used=$attempt
             status=$(curl --silent --show-error --max-time 15 --request GET \
@@ -79,14 +81,21 @@ jobs:
               "${{ steps.deploy.outputs.worker_url }}/ready" \
               --output /tmp/sovrn-pilot-ready.json --write-out '%{http_code}')
             set +e
-            node pilot/report-sovrn-bootstrap.mjs "$status" "$attempt" /tmp/sovrn-pilot-ready.json
+            node pilot/report-sovrn-bootstrap.mjs "$status" "$attempt" /tmp/sovrn-pilot-ready.json "$SOVRN_PILOT_BUILD_ID" "$consecutive_successes"
             bootstrap_result=$?
             set -e
             if [[ "$bootstrap_result" == "0" ]]; then
-              ready=true
-              break
+              consecutive_successes=$((consecutive_successes + 1))
+              if [[ "$consecutive_successes" == "2" ]]; then
+                ready=true
+                break
+              fi
+            elif [[ "$bootstrap_result" == "10" ]]; then
+              consecutive_successes=0
+            else
+              exit 2
             fi
-            if [[ "$bootstrap_result" != "10" || "$attempt" == "10" ]]; then
+            if [[ "$attempt" == "10" ]]; then
               exit 2
             fi
             sleep 2
@@ -95,7 +104,7 @@ jobs:
             exit 2
           fi
           readiness_wait_seconds=$((2 + (attempts_used - 1) * 2))
-          echo "Sovrn pilot bootstrap ready after ${attempts_used} attempt(s) and ${readiness_wait_seconds}s bounded wait."
+          echo "Sovrn pilot bootstrap reached two consecutive build-matched successes after ${attempts_used} attempt(s) and ${readiness_wait_seconds}s bounded wait."
           status=$(curl --silent --show-error --max-time 180 --request POST \
             --header "x-pilot-secret: ${PILOT_RUN_SECRET}" \
             "${{ steps.deploy.outputs.worker_url }}/pilot" \

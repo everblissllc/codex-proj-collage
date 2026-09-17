@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 const httpStatus = Number(process.argv[3]);
 const allowedKeys = new Set([
   "SOVRN_SECRET_KEY", "SOVRN_SITE_API_KEY", "SOVRN_CAMPAIGN_ID", "SOVRN_MARKET",
-  "SOVRN_PILOT_PLAINLINKS_JSON", "PILOT_RUN_SECRET"
+  "SOVRN_PILOT_PLAINLINKS_JSON", "SOVRN_PILOT_BUILD_ID", "PILOT_RUN_SECRET"
 ]);
 let payload;
 try { payload = JSON.parse(readFileSync(process.argv[2], "utf8")); }
