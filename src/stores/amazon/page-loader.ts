@@ -12,7 +12,13 @@ export class BrowserAmazonPageLoader implements AmazonPageLoader {
     const initial = validatePublicUrl(url);
     if (!allowedAmazonHost(initial.hostname.toLowerCase())) throw new ProductError("UNSAFE_AMAZON_URL", "url", "Amazon browser URL rejected");
     const started = Date.now();
-    const response = await this.browser.quickAction("content", { url: initial.href, gotoOptions: { waitUntil: "domcontentloaded", timeout: 20_000 }, actionTimeout: 10_000, cacheTTL: 0 });
+    const response = await this.browser.quickAction("content", {
+      url: initial.href,
+      gotoOptions: { waitUntil: "domcontentloaded", timeout: 20_000 },
+      waitForSelector: { selector: "#productTitle", visible: true, timeout: 10_000 },
+      actionTimeout: 12_000,
+      cacheTTL: 0
+    });
     if (!response.ok) { await response.body?.cancel(); throw new ProductError("AMAZON_BROWSER_ERROR", "extraction", `Amazon Browser content returned HTTP ${response.status}`); }
     const payload = await response.json() as { success?: boolean; result?: unknown; meta?: { status?: number; finalUrl?: string; redirectChain?: unknown[] } };
     if (!payload.success || typeof payload.result !== "string" || typeof payload.meta?.finalUrl !== "string") throw new ProductError("AMAZON_BROWSER_ERROR", "extraction", "Amazon Browser content response invalid");

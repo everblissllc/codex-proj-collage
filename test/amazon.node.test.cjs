@@ -112,9 +112,15 @@ test("JSON-LD for another variation is never borrowed for the resolved ASIN", ()
 });
 
 test("Browser Amazon content loader enforces final Amazon hostname", async () => {
-  const browser = { quickAction: async () => Response.json({ success: true, result: sale, meta: { status: 200, finalUrl: saleUrl, redirectChain: [] } }) };
+  let options;
+  const browser = { quickAction: async (_action, value) => {
+    options = value;
+    return Response.json({ success: true, result: sale, meta: { status: 200, finalUrl: saleUrl, redirectChain: [] } });
+  } };
   const loaded = await new BrowserAmazonPageLoader(browser).load(saleUrl, "amazon-loader");
   assert.equal(loaded.resolvedUrl, saleUrl);
+  assert.deepEqual(options.waitForSelector, { selector: "#productTitle", visible: true, timeout: 10_000 });
+  assert.equal(options.actionTimeout, 12_000);
   const bad = { quickAction: async () => Response.json({ success: true, result: sale, meta: { status: 200, finalUrl: "https://evil.example.org/product" } }) };
   await assert.rejects(new BrowserAmazonPageLoader(bad).load(saleUrl), { code: "UNSAFE_AMAZON_URL" });
 });
