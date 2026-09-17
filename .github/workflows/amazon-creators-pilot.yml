@@ -1,9 +1,7 @@
 name: Amazon Creators API Pilot
 
 on:
-  push:
-    branches:
-      - test/amazon-pilot
+  workflow_dispatch:
 
 jobs:
   pilot:

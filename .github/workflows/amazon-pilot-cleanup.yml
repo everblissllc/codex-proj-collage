@@ -1,0 +1,41 @@
+name: Amazon Pilot Cleanup
+
+on:
+  push:
+    branches:
+      - test/amazon-pilot
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    environment: amazon-pilot
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - name: Delete exact temporary Amazon pilot Worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          script_name="affiliate-amazon-pilot-35264943148"
+          endpoint="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${script_name}"
+          status=$(curl --silent --show-error --max-time 30 \
+            --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            --output /dev/null --write-out '%{http_code}' "$endpoint")
+          if [[ "$status" == "404" ]]; then
+            echo "Temporary Amazon pilot Worker: already absent"
+            exit 0
+          fi
+          if [[ "$status" != "200" ]]; then
+            echo "Temporary Amazon pilot Worker inspection failed: HTTP $status" >&2
+            exit 2
+          fi
+          delete_status=$(curl --silent --show-error --max-time 30 \
+            --request DELETE \
+            --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            --output /dev/null --write-out '%{http_code}' "$endpoint")
+          if [[ "$delete_status" != "200" && "$delete_status" != "204" ]]; then
+            echo "Temporary Amazon pilot Worker deletion failed: HTTP $delete_status" >&2
+            exit 2
+          fi
+          echo "Temporary Amazon pilot Worker: deleted"
