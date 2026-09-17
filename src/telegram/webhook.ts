@@ -70,7 +70,7 @@ export function telegramErrorMessage(error: unknown): string {
   if (error.code === "MISSING_PRICE") return "I found the product, but couldn't reliably determine its current price.";
   if (error.stage === "ai") return "I found the product but couldn't generate the card text. Please try again.";
   if (error.stage === "render") return "I found the product but couldn't generate the image.";
-  if (error.stage === "extraction") return "I found the Walmart page but couldn't read the product information.";
+  if (error.stage === "extraction") return "I found the product page but couldn't read the product information.";
   return "Please send a valid product link.";
 }
 

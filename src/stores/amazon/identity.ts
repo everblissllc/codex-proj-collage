@@ -93,17 +93,19 @@ export function trustedAmazonAsin(inputUrl: string): string {
 }
 
 export function resolveAmazonIdentity(inputUrl: string, resolvedUrl: string, html?: string): AmazonResolvedIdentity {
-  const asin = trustedAmazonAsin(inputUrl);
   const finalUrl = validatePublicUrl(resolvedUrl);
   if (!allowedAmazonHost(finalUrl.hostname)) throw new ProductError("UNSAFE_AMAZON_URL", "url", "Amazon redirect left the approved retailer domain");
 
+  const submittedAsin = amazonAsinFromUrl(inputUrl);
   const resolvedAsin = amazonAsinFromUrl(finalUrl.href);
   const evidence = resolvedAsin
     ? { sourceIdentityAsin: resolvedAsin, sourceIdentitySource: "resolved-product-route" as const }
     : sourceEvidence(html, finalUrl.href);
-  if (evidence.sourceIdentityAsin && evidence.sourceIdentityAsin !== asin) {
+  if (submittedAsin && evidence.sourceIdentityAsin && evidence.sourceIdentityAsin !== submittedAsin) {
     throw new ProductError("AMAZON_ASIN_MISMATCH", "extraction", "Amazon redirect identifies another product", "SOURCE_CONFLICT");
   }
+  const asin = submittedAsin ?? evidence.sourceIdentityAsin;
+  if (!asin) throw new ProductError("MISSING_PRODUCT_ID", "extraction", "Amazon destination does not contain a trusted ASIN");
   return {
     asin,
     sourceIdentityState: evidence.sourceIdentityAsin ? "SOURCE_CONFIRMED" : "SOURCE_UNCONFIRMED",

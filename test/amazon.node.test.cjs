@@ -72,6 +72,19 @@ test("Amazon redirect identity preserves a trusted original ASIN across unconfir
   assert.throws(() => trustedAmazonAsin("https://amzn.to/ExactShortCode"), { code: "MISSING_PRODUCT_ID" });
 });
 
+test("opaque trackers obtain Amazon identity only from the resolved destination or authoritative page evidence", () => {
+  const linkAmazon = "https://link.amazon/B019JQ4Xw";
+  const joyLink = "https://joylink.io/amazon/amd-ryzen-9-32thread-processor";
+  assert.deepEqual(resolveAmazonIdentity(linkAmazon, "https://www.amazon.com/dp/B08HNBHSQV"), {
+    asin: "B08HNBHSQV", sourceIdentityState: "SOURCE_CONFIRMED",
+    sourceIdentityAsin: "B08HNBHSQV", sourceIdentitySource: "resolved-product-route"
+  });
+  assert.equal(resolveAmazonIdentity(joyLink, "https://www.amazon.com/gp/product/B08HNBHSQV").asin, "B08HNBHSQV");
+  assert.equal(resolveAmazonIdentity(linkAmazon, "https://www.amazon.com/clp/opaque", '<link rel="canonical" href="https://www.amazon.com/dp/B08HNBHSQV">').asin, "B08HNBHSQV");
+  assert.throws(() => resolveAmazonIdentity(linkAmazon, "https://www.amazon.com/clp/opaque", "<html></html>"), { code: "MISSING_PRODUCT_ID" });
+  assert.throws(() => resolveAmazonIdentity(linkAmazon, "https://example.org/dp/B08HNBHSQV"), { code: "UNSAFE_AMAZON_URL" });
+});
+
 test("Creators token is obtained, cached, refreshed near expiry, and uses the official version endpoint", async () => {
   let now = 1_000;
   let calls = 0;
@@ -441,15 +454,40 @@ test("Amazon Creators orchestration preserves exact affiliate URL, isolates AI, 
   assert.equal(result.content.facebookPost, `#Ad 🚨 ESR Magnetic Car Charger is now $24.99, list price $39.99.\n\n👉 ${affiliate}`);
 });
 
-test("Amazon input without a trusted product-route ASIN is rejected before resolution", async () => {
-  let fetches = 0;
-  await assert.rejects(processProductLink(shortAffiliate, {
-    fetcher: async () => { fetches++; throw Error("must not fetch"); }, dnsCheck: async () => {},
-    copyProvider: { generate: async () => ({ shortTitle: "unused" }) },
-    renderer: { screenshot: async () => ({ bytes: new Uint8Array(), mimeType: "image/png" }) },
-    disclosure: "#Ad", requestId: "amazon-short", amazonProductProvider: creatorsProvider()
-  }), { code: "MISSING_PRODUCT_ID" });
-  assert.equal(fetches, 0);
+test("Amazon short and multi-hop tracking links route by final destination and preserve exact postUrl", async () => {
+  const cases = [
+    { input: "https://link.amazon/B019JQ4Xw", chain: ["https://www.amazon.com/dp/B08HNBHSQV"] },
+    { input: "https://joylink.io/amazon/amd-ryzen-9-32thread-processor", chain: ["https://tracker.example.net/click/abc", "https://www.amazon.com/gp/product/B08HNBHSQV"] },
+    { input: shortAffiliate, chain: ["https://www.amazon.com/dp/B08HNBHSQV"] }
+  ];
+  for (const current of cases) {
+    const image = new Uint8Array([255,216,255,217]);
+    const destinations = [...current.chain];
+    let providerAsin;
+    const result = await processProductLink(current.input, {
+      fetcher: async url => {
+        if (url === current.input || current.chain.slice(0, -1).includes(url)) {
+          const location = destinations.shift();
+          return new Response(null, { status: 302, headers: { location } });
+        }
+        if (url === current.chain.at(-1)) return new Response("<html></html>", { headers: { "content-type": "text/html" } });
+        if (url.startsWith("https://m.media-amazon.com/")) return new Response(image, { headers: { "content-type": "image/jpeg" } });
+        throw new Error(`Unexpected fetch host: ${new URL(url).hostname}`);
+      },
+      dnsCheck: async () => {},
+      copyProvider: { generate: async () => ({ shortTitle: "ESR Magnetic Car Charger" }) },
+      renderer: { screenshot: async () => ({ bytes: new Uint8Array([137,80,78,71,13,10,26,10]), mimeType: "image/png" }) },
+      amazonProductProvider: { product: async (asin, inputUrl, resolvedUrl) => {
+        providerAsin = asin;
+        return mapCreatorsItem(creatorsItem(), asin, inputUrl, resolvedUrl);
+      } },
+      disclosure: "#Ad", requestId: "amazon-tracker"
+    });
+    assert.equal(providerAsin, "B08HNBHSQV");
+    assert.equal(result.product.store, "amazon");
+    assert.equal(result.product.postUrl, current.input);
+    assert.ok(result.content.facebookPost.endsWith(current.input));
+  }
 });
 
 test("Amazon CLP redirect retains original ASIN and exact postUrl through Creators verification", async () => {

@@ -16,7 +16,7 @@ import { screenshotStore } from "../stores/screenshot/registry";
 import { processScreenshotStore } from "./process-screenshot-store";
 import type { MobilePageScreenshotRenderer } from "../rendering/mobile-page-renderer";
 import { amazonAsinFromUrl } from "../stores/amazon/diagnostics";
-import { resolveAmazonIdentity, trustedAmazonAsin } from "../stores/amazon/identity";
+import { resolveAmazonIdentity } from "../stores/amazon/identity";
 import type { AmazonProductProvider } from "../stores/amazon/creators-api-product";
 
 export type ProcessDeps = { fetcher: FetchLike; copyProvider: CopyProvider; renderer: ScreenshotRenderer; pageRenderer?: MobilePageScreenshotRenderer; amazonProductProvider?: AmazonProductProvider; disclosure: string; requestId: string; telegramUserId?: number; dnsCheck?: DnsCheck; cardCache?: CardCache };
@@ -82,9 +82,7 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
   let cacheBuilderToken: string | undefined;
   try {
     validatePublicUrl(inputUrl);
-    const directStore = detectStore(inputUrl);
-    if (directStore === "amazon") trustedAmazonAsin(inputUrl);
-    if (directStore && directStore !== "walmart" && directStore !== "amazon" && !screenshotStore(directStore)) throw new ProductError("UNSUPPORTED_STORE", "store", `Unsupported store: ${directStore}`);
+    const submittedStore = detectStore(inputUrl);
     const extractionStart = Date.now();
     const page = await resolveUrl(inputUrl, deps.fetcher, undefined, deps.dnsCheck);
     hostname = new URL(page.resolvedUrl).hostname;
@@ -92,11 +90,11 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
     store = detectStore(page.resolvedUrl);
     console.log(JSON.stringify({ event: "store_detected", ...base, hostname, store: store ?? "unsupported" }));
     const adapter = store ? screenshotStore(store) : undefined;
-    if (directStore === "elf" && store !== "elf") {
+    if (submittedStore === "elf" && store !== "elf") {
       await page.response.body?.cancel();
       throw new ProductError("UNSAFE_SCREENSHOT_URL", "url", "Cross-store screenshot redirect rejected");
     }
-    if (directStore === "amazon" && store !== "amazon") {
+    if (submittedStore === "amazon" && store !== "amazon") {
       await page.response.body?.cancel();
       throw new ProductError("UNSAFE_AMAZON_URL", "url", "Amazon redirect left the approved retailer domain");
     }

@@ -14,7 +14,8 @@ const { generateProductCopy } = src("ai/generate-product-copy.js");
 const { walmartCardHtml } = src("stores/walmart/template.js");
 const { BrowserScreenshotRenderer, browserRateLimitDelayMs } = src("rendering/browser-renderer.js");
 const { processProductLink } = src("orchestration/process-product-link.js");
-const { handleTelegramWebhook, processTelegramJob } = src("telegram/webhook.js");
+const { handleTelegramWebhook, processTelegramJob, telegramErrorMessage } = src("telegram/webhook.js");
+const { ProductError } = src("types.js");
 const withWas = readFileSync("test/fixtures/walmart-with-was.html", "utf8");
 const currentOnly = readFileSync("test/fixtures/walmart-current-only.html", "utf8");
 const input = "https://affiliate.example.org/go?id=abc";
@@ -48,6 +49,24 @@ test("short link resolves with manual redirects", async () => {
   assert.equal(page.redirectCount, 1);
   assert.equal(calls.length, 2);
   assert.equal(calls[0][1].redirect, "manual");
+});
+test("bounded redirect resolution rejects loops, excess hops, and unsafe schemes", async () => {
+  const second = "https://tracker.example.net/click/2";
+  let loopCalls = 0;
+  await assert.rejects(resolveUrl(input, async url => {
+    loopCalls++;
+    return new Response(null, { status: 302, headers: { location: url === input ? second : input } });
+  }, undefined, async () => {}), { code: "REDIRECT_LOOP" });
+  assert.equal(loopCalls, 2);
+
+  let limitCalls = 0;
+  await assert.rejects(resolveUrl(input, async () => {
+    limitCalls++;
+    return new Response(null, { status: 302, headers: { location: `https://tracker${limitCalls}.example.net/click` } });
+  }, undefined, async () => {}), { code: "TOO_MANY_REDIRECTS" });
+  assert.equal(limitCalls, 6);
+
+  await assert.rejects(resolveUrl(input, async () => new Response(null, { status: 302, headers: { location: "javascript:alert(1)" } }), undefined, async () => {}), { code: "UNSAFE_URL" });
 });
 test("SSRF redirect target is rejected before fetch", async () => {
   assert.throws(() => validatePublicUrl("http://169.254.169.254/"));
@@ -642,6 +661,41 @@ test("unsupported store stops before AI and rendering", async () => {
   let called = false;
   await assert.rejects(processProductLink("https://example.org/item", { fetcher: async () => new Response("html"), dnsCheck: async () => {}, copyProvider: { generate: async () => { called = true; throw new Error(); } }, renderer: { screenshot: async () => { called = true; throw new Error(); } }, disclosure: "#Ad", requestId: "test" }), { code: "UNSUPPORTED_STORE" });
   assert.equal(called, false);
+});
+test("JoyLink path text never selects a retailer; final Walmart destination does and preserves postUrl", async () => {
+  const joyLink = "https://joylink.io/amazon/amd-ryzen-9-32thread-processor";
+  const middle = "https://tracker.example.net/redirect/123";
+  const png = new Uint8Array([137,80,78,71,13,10,26,10]);
+  const result = await processProductLink(joyLink, {
+    fetcher: async url => {
+      if (url === joyLink) return new Response(null, { status: 302, headers: { location: middle } });
+      if (url === middle) return new Response(null, { status: 302, headers: { location: walmart } });
+      if (url === walmart) return new Response(withWas, { headers: { "content-type": "text/html" } });
+      if (url.includes("walmartimages.com")) return new Response(png, { headers: { "content-type": "image/png" } });
+      throw new Error(`Unexpected fetch host: ${new URL(url).hostname}`);
+    },
+    dnsCheck: async () => {},
+    copyProvider: { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set" }) },
+    renderer: { screenshot: async () => ({ bytes: png, mimeType: "image/png" }) },
+    disclosure: "#Ad", requestId: "joylink-walmart"
+  });
+  assert.equal(result.product.store, "walmart");
+  assert.equal(result.product.postUrl, joyLink);
+  assert.equal(result.product.resolvedUrl, walmart);
+  assert.ok(result.content.facebookPost.endsWith(joyLink));
+});
+test("unknown final hosts remain unsupported and extraction errors no longer claim Walmart", async () => {
+  const tracker = "https://tracker.example.org/click/unknown";
+  await assert.rejects(processProductLink(tracker, {
+    fetcher: async url => url === tracker
+      ? new Response(null, { status: 302, headers: { location: "https://merchant.example.net/product/1" } })
+      : new Response("<html></html>", { headers: { "content-type": "text/html" } }),
+    dnsCheck: async () => {},
+    copyProvider: { generate: async () => { throw new Error("AI must not run"); } },
+    renderer: { screenshot: async () => { throw new Error("renderer must not run"); } },
+    disclosure: "#Ad", requestId: "unknown-final"
+  }), { code: "UNSUPPORTED_STORE" });
+  assert.equal(telegramErrorMessage(new ProductError("MISSING_PRODUCT_ID", "extraction", "missing")), "I found the product page but couldn't read the product information.");
 });
 test("orchestration uses one page fetch and one image fetch", async () => {
   const responses = [new Response(null, { status: 302, headers: { location: walmart } }), new Response(withWas, { headers: { "content-type": "text/html" } }), new Response(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), { headers: { "content-type": "image/png" } })];
