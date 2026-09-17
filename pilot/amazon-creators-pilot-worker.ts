@@ -26,7 +26,7 @@ type Env = {
   PILOT_RUN_SECRET?: string;
 };
 
-const PRODUCTS = ["B00MNV8E0C", "B09B2SBHQK", "B09B8V1LZ3", "B08HNBHSQV"] as const;
+const PRODUCTS = ["B08HNBHSQV"] as const;
 const REQUIRED_ENV = [
   "AMAZON_CREATORS_CLIENT_ID",
   "AMAZON_CREATORS_CLIENT_SECRET",
@@ -173,13 +173,16 @@ async function runPilot(env: Env): Promise<Response> {
         exactOriginalUrlPreserved: product.postUrl === originalUrl
       });
 
-      const aiObservation = { calls: 0, sawUrl: false, sawAsin: false, sawPrice: false };
+      const aiObservation = { calls: 0, sawUrl: false, sawAsin: false, sawPrice: false, sawDisclosure: false, sawPartnerTag: false, sawSavings: false };
       const copyProvider: CopyProvider = {
         async generate(rawTitle, correctionReason) {
           aiObservation.calls++;
           aiObservation.sawUrl ||= /https?:\/\//i.test(rawTitle);
           aiObservation.sawAsin ||= rawTitle.includes(asin);
           aiObservation.sawPrice ||= rawTitle.includes(product.currentPrice.formatted) || Boolean(product.oldPrice && rawTitle.includes(product.oldPrice.formatted));
+          aiObservation.sawDisclosure ||= rawTitle.includes(env.AFFILIATE_DISCLOSURE);
+          aiObservation.sawPartnerTag ||= rawTitle.includes(env.AMAZON_CREATORS_PARTNER_TAG!);
+          aiObservation.sawSavings ||= typeof product.amazon?.savings?.percentage === "number" && rawTitle.includes(String(product.amazon.savings.percentage));
           return underlyingCopy.generate(rawTitle, correctionReason);
         }
       };
@@ -194,14 +197,22 @@ async function runPilot(env: Env): Promise<Response> {
         aiReceivedUrl: aiObservation.sawUrl,
         aiReceivedAsin: aiObservation.sawAsin,
         aiReceivedPrice: aiObservation.sawPrice,
+        aiReceivedDisclosure: aiObservation.sawDisclosure,
+        aiReceivedPartnerTag: aiObservation.sawPartnerTag,
+        aiReceivedSavings: aiObservation.sawSavings,
         facebookCopy: content.facebookPost.replace(originalUrl, "<EXACT_ORIGINAL_AFFILIATE_URL>"),
         facebookCopyPreservedOriginalUrl: content.facebookPost.endsWith(originalUrl),
+        facebookCopyUsesWas: /\bwas\s+\$/i.test(content.facebookPost),
+        facebookCopyIncludesSavings: typeof product.amazon?.savings?.percentage === "number" && content.facebookPost.includes(`${product.amazon.savings.percentage}%`),
+        shortTitlePresent: Boolean(content.shortTitle.trim()),
         pngWidth: dimensions?.width,
         pngHeight: dimensions?.height,
         pngBytes: card.bytes.byteLength,
+        pngMimeType: card.mimeType,
         renderDurationMs: Date.now() - renderStarted,
         renderedCurrentPrice: product.currentPrice.formatted,
         renderedReferencePrice: product.oldPrice?.formatted,
+        renderedSavingsPercentage: product.amazon?.savings?.percentage,
         referenceWording: product.amazon?.referencePriceType === "LIST_PRICE" ? "list price" : product.oldPrice ? "was" : "none",
         artifactFilename: filename
       });
@@ -225,7 +236,17 @@ async function runPilot(env: Env): Promise<Response> {
   const successfulGetItems = getItemsRequests.filter(request => request.status >= 200 && request.status < 300);
   const gaps = getItemsRequests.slice(1).map((request, index) => request.startedAt - getItemsRequests[index].startedAt);
   const accepted = results.filter(result => result.offerAccepted === true);
-  const success = accepted.length > 0 && cards.length === accepted.length && tokenRequests.some(request => request.status >= 200 && request.status < 300);
+  const success = results.length === 1 && accepted.length === 1 && cards.length === 1 &&
+    tokenRequests.length === 1 && tokenRequests[0].status >= 200 && tokenRequests[0].status < 300 &&
+    getItemsRequests.length === 1 && successfulGetItems.length === 1 &&
+    accepted.every(result => result.asinMatches === true && result.titlePresent === true && result.primaryImagePresent === true &&
+      result.currentPricePresent === true && result.exactOriginalUrlPreserved === true && result.facebookCopyPreservedOriginalUrl === true &&
+      result.shortTitlePresent === true && typeof result.aiCalls === "number" && result.aiCalls >= 1 && result.aiCalls <= 2 &&
+      result.aiReceivedUrl === false && result.aiReceivedAsin === false &&
+      result.aiReceivedPrice === false && result.aiReceivedDisclosure === false && result.aiReceivedPartnerTag === false &&
+      result.aiReceivedSavings === false && result.facebookCopyUsesWas === false && result.facebookCopyIncludesSavings === false &&
+      result.pngWidth === 1200 && result.pngHeight === 1200 && result.pngMimeType === "image/png" &&
+      typeof result.pngBytes === "number" && result.pngBytes > 0);
   return jsonResponse({
     success,
     source: "amazon-creators-api",

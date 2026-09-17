@@ -24,11 +24,15 @@ const regularUrl = "https://www.amazon.com/gp/product/B00MNV8E0C";
 const affiliate = "https://www.amazon.com/dp/B08HNBHSQV?tag=partner-20&th=1";
 const shortAffiliate = "https://amzn.to/ExactShortCode";
 
-test("hosted Creators credential pilot runs directly without Worker or Wrangler operations", () => {
+test("hosted Creators E2E pilot uses one isolated temporary Worker", () => {
   const workflow = readFileSync(".github/workflows/amazon-creators-pilot.yml", "utf8");
-  assert.match(workflow, /amazon-creators-direct-runner\.js/);
-  assert.doesNotMatch(workflow, /wrangler|workers\.dev|secret bulk|CLOUDFLARE_|\/ready|workers\/scripts/i);
-  assert.doesNotMatch(workflow, /(?:curl|fetch)[^\n]*\/pilot|worker_url|PILOT_RUN_SECRET/i);
+  assert.match(workflow, /worker_name="affiliate-amazon-pilot-\$\{GITHUB_RUN_ID\}"/);
+  assert.match(workflow, /wrangler deploy[\s\S]*--name "\$\{\{ steps\.prepare\.outputs\.worker_name \}\}"[\s\S]*--secrets-file/);
+  assert.match(workflow, /wrangler delete "\$\{\{ steps\.prepare\.outputs\.worker_name \}\}" --force/);
+  assert.equal((workflow.match(/--request POST/g) ?? []).length, 1);
+  assert.doesNotMatch(workflow, /affiliate-deal-card-bot|PRODUCT_JOBS|CARD_CACHE_DB|CARD_CACHE_BUCKET|TELEGRAM/);
+  const pilotWorker = readFileSync("pilot/amazon-creators-pilot-worker.ts", "utf8");
+  assert.match(pilotWorker, /const PRODUCTS = \["B08HNBHSQV"\]/);
   const runner = readFileSync("pilot/amazon-creators-direct-runner.ts", "utf8");
   assert.match(runner, /https:\/\/api\.amazon\.com\/auth\/o2\/token/);
   assert.match(runner, /https:\/\/creatorsapi\.amazon\/catalog\/v1\/getItems/);
