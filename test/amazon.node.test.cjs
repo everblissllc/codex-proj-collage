@@ -5,6 +5,7 @@ const { join } = require("node:path");
 const src = path => require(join(process.env.COMPILED_ROOT, path));
 const { detectStore } = src("stores/detect-store.js");
 const { amazonAsinFromUrl, inspectAmazonHtml, usableAmazonHtml } = src("stores/amazon/diagnostics.js");
+const { resolveAmazonIdentity, trustedAmazonAsin } = src("stores/amazon/identity.js");
 const { extractAmazonProduct } = src("stores/amazon/extractor.js");
 const { amazonCardHtml } = src("stores/amazon/template.js");
 const { BrowserAmazonPageLoader } = src("stores/amazon/page-loader.js");
@@ -79,6 +80,20 @@ test("ASIN parsing accepts verified PDP path forms and rejects malformed paths",
   assert.equal(amazonAsinFromUrl("https://www.amazon.com/gp/aw/d/B08HNBHSQV"), undefined);
   assert.equal(amazonAsinFromUrl("https://www.amazon.com/dp/too-short"), undefined);
   assert.equal(amazonAsinFromUrl("https://fakeamazon.com/dp/B08HNBHSQV"), undefined);
+});
+
+test("Amazon redirect identity preserves a trusted original ASIN across unconfirmed CLP routes", () => {
+  const original = "https://www.amazon.com/dp/B08HNBHSQV?tag=partner-20&ref_=pilot";
+  const clp = "https://www.amazon.com/clp/B08HNBHSQV";
+  assert.equal(trustedAmazonAsin(original), "B08HNBHSQV");
+  assert.deepEqual(resolveAmazonIdentity(original, clp, "<html><title>Product</title></html>"), {
+    asin: "B08HNBHSQV", sourceIdentityState: "SOURCE_UNCONFIRMED"
+  });
+  assert.equal(resolveAmazonIdentity(original, clp, '<link rel="canonical" href="https://www.amazon.com/dp/B08HNBHSQV">').sourceIdentityState, "SOURCE_CONFIRMED");
+  assert.throws(() => resolveAmazonIdentity(original, clp, '<link rel="canonical" href="https://www.amazon.com/dp/B00MNV8E0C">'), { code: "AMAZON_ASIN_MISMATCH", validationReason: "SOURCE_CONFLICT" });
+  assert.throws(() => resolveAmazonIdentity(original, "https://www.amazon.com/dp/B00MNV8E0C"), { code: "AMAZON_ASIN_MISMATCH" });
+  assert.throws(() => resolveAmazonIdentity(original, "https://example.com/clp/B08HNBHSQV"), { code: "UNSAFE_AMAZON_URL" });
+  assert.throws(() => trustedAmazonAsin("https://amzn.to/ExactShortCode"), { code: "MISSING_PRODUCT_ID" });
 });
 
 test("Amazon sale extraction uses one-time deal and genuine higher reference price", () => {
@@ -556,17 +571,64 @@ test("Amazon Creators orchestration preserves exact affiliate URL, isolates AI, 
   assert.equal(result.content.facebookPost, `#Ad 🚨 ESR Magnetic Car Charger is now $24.99, list price $39.99.\n\n👉 ${affiliate}`);
 });
 
-test("amzn.to resolves internally while final copy retains exact short link", async () => {
+test("Amazon input without a trusted product-route ASIN is rejected before resolution", async () => {
+  let fetches = 0;
+  await assert.rejects(processProductLink(shortAffiliate, {
+    fetcher: async () => { fetches++; throw Error("must not fetch"); }, dnsCheck: async () => {},
+    copyProvider: { generate: async () => ({ shortTitle: "unused" }) },
+    renderer: { screenshot: async () => ({ bytes: new Uint8Array(), mimeType: "image/png" }) },
+    disclosure: "#Ad", requestId: "amazon-short", amazonProductProvider: creatorsProvider()
+  }), { code: "MISSING_PRODUCT_ID" });
+  assert.equal(fetches, 0);
+});
+
+test("Amazon CLP redirect retains original ASIN and exact postUrl through Creators verification", async () => {
   const image = new Uint8Array([255,216,255,217]);
-  const responses = [new Response(null, { status: 302, headers: { location: saleUrl } }), new Response("resolution only", { headers: { "content-type": "text/html" } }), new Response(image, { headers: { "content-type": "image/jpeg" } })];
-  const result = await processProductLink(shortAffiliate, {
-    fetcher: async () => responses.shift(), dnsCheck: async () => {}, copyProvider: { generate: async () => ({ shortTitle: "ESR Magnetic Car Charger" }) },
-    renderer: { screenshot: async () => ({ bytes: new Uint8Array([137,80,78,71,13,10,26,10]), mimeType: "image/png" }) }, disclosure: "#Ad", requestId: "amazon-short"
-    , amazonProductProvider: creatorsProvider()
+  const clpUrl = "https://www.amazon.com/clp/B08HNBHSQV";
+  const responses = [
+    new Response(null, { status: 302, headers: { location: clpUrl } }),
+    new Response("<html><title>Primary product</title></html>", { headers: { "content-type": "text/html" } }),
+    new Response(image, { headers: { "content-type": "image/jpeg" } })
+  ];
+  let providerAsin;
+  const result = await processProductLink(affiliate, {
+    fetcher: async () => responses.shift(), dnsCheck: async () => {},
+    copyProvider: { generate: async () => ({ shortTitle: "ESR Magnetic Car Charger" }) },
+    renderer: { screenshot: async () => ({ bytes: new Uint8Array([137,80,78,71,13,10,26,10]), mimeType: "image/png" }) },
+    amazonProductProvider: { product: async (asin, inputUrl, resolvedUrl) => {
+      providerAsin = asin;
+      return mapCreatorsItem(creatorsItem(), asin, inputUrl, resolvedUrl);
+    } },
+    disclosure: "#Ad", requestId: "amazon-clp"
   });
-  assert.equal(result.product.resolvedUrl, saleUrl);
-  assert.equal(result.product.postUrl, shortAffiliate);
-  assert.ok(result.content.facebookPost.endsWith(shortAffiliate));
+  assert.equal(providerAsin, "B08HNBHSQV");
+  assert.equal(result.product.resolvedUrl, clpUrl);
+  assert.equal(result.product.postUrl, affiliate);
+  assert.ok(result.content.facebookPost.endsWith(affiliate));
+});
+
+test("Amazon CLP flow rejects a mismatched Creators ASIN and supported-route redirect before API", async () => {
+  const clpResponses = [
+    new Response(null, { status: 302, headers: { location: "https://www.amazon.com/clp/B08HNBHSQV" } }),
+    new Response("<html></html>", { headers: { "content-type": "text/html" } })
+  ];
+  await assert.rejects(processProductLink(affiliate, {
+    fetcher: async () => clpResponses.shift(), dnsCheck: async () => {},
+    copyProvider: { generate: async () => ({ shortTitle: "unused" }) }, renderer: { screenshot: async () => { throw Error("must not render"); } },
+    amazonProductProvider: creatorsProvider(creatorsItem({ asin: "B00MNV8E0C" })), disclosure: "#Ad", requestId: "amazon-clp-api-mismatch"
+  }), { code: "AMAZON_ASIN_MISMATCH" });
+
+  let providerCalls = 0;
+  const routeResponses = [
+    new Response(null, { status: 302, headers: { location: "https://www.amazon.com/dp/B00MNV8E0C" } }),
+    new Response("<html></html>", { headers: { "content-type": "text/html" } })
+  ];
+  await assert.rejects(processProductLink(affiliate, {
+    fetcher: async () => routeResponses.shift(), dnsCheck: async () => {},
+    copyProvider: { generate: async () => ({ shortTitle: "unused" }) }, renderer: { screenshot: async () => { throw Error("must not render"); } },
+    amazonProductProvider: { product: async () => { providerCalls++; throw Error("must not call API"); } }, disclosure: "#Ad", requestId: "amazon-route-mismatch"
+  }), { code: "AMAZON_ASIN_MISMATCH" });
+  assert.equal(providerCalls, 0);
 });
 
 test("Amazon Creators path never invokes HTML extraction, Browser content fallback, or screenshot-store rendering", async () => {

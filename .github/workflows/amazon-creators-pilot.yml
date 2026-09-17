@@ -48,6 +48,31 @@ jobs:
           node scripts/check-smoke-config.mjs
           npx tsc --noEmit -p tsconfig.amazon-creators-pilot.json
           npx wrangler deploy --dry-run --config wrangler.amazon-creators-pilot.jsonc
+      - name: Remove previous isolated pilot Worker if present
+        shell: bash
+        run: |
+          set -euo pipefail
+          script_name="affiliate-amazon-pilot-35262933995"
+          endpoint="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${script_name}"
+          status=$(curl --silent --show-error --max-time 30 \
+            --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            --output /dev/null --write-out '%{http_code}' "$endpoint")
+          if [[ "$status" == "404" ]]; then
+            echo "Previous temporary Worker status: already absent"
+          elif [[ "$status" == "200" ]]; then
+            delete_status=$(curl --silent --show-error --max-time 30 \
+              --request DELETE \
+              --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              --output /dev/null --write-out '%{http_code}' "$endpoint")
+            if [[ "$delete_status" != "200" && "$delete_status" != "204" ]]; then
+              echo "Previous temporary Worker deletion failed: HTTP $delete_status" >&2
+              exit 2
+            fi
+            echo "Previous temporary Worker status: deleted"
+          else
+            echo "Previous temporary Worker inspection failed: HTTP $status" >&2
+            exit 2
+          fi
       - name: Prepare isolated pilot
         id: prepare
         shell: bash

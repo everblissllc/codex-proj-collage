@@ -16,6 +16,7 @@ import { screenshotStore } from "../stores/screenshot/registry";
 import { processScreenshotStore } from "./process-screenshot-store";
 import type { MobilePageScreenshotRenderer } from "../rendering/mobile-page-renderer";
 import { amazonAsinFromUrl } from "../stores/amazon/diagnostics";
+import { resolveAmazonIdentity, trustedAmazonAsin } from "../stores/amazon/identity";
 import type { AmazonProductProvider } from "../stores/amazon/creators-api-product";
 
 export type ProcessDeps = { fetcher: FetchLike; copyProvider: CopyProvider; renderer: ScreenshotRenderer; pageRenderer?: MobilePageScreenshotRenderer; amazonProductProvider?: AmazonProductProvider; disclosure: string; requestId: string; telegramUserId?: number; dnsCheck?: DnsCheck; cardCache?: CardCache };
@@ -82,6 +83,7 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
   try {
     validatePublicUrl(inputUrl);
     const directStore = detectStore(inputUrl);
+    if (directStore === "amazon") trustedAmazonAsin(inputUrl);
     if (directStore && directStore !== "walmart" && directStore !== "amazon" && !screenshotStore(directStore)) throw new ProductError("UNSUPPORTED_STORE", "store", `Unsupported store: ${directStore}`);
     const extractionStart = Date.now();
     const page = await resolveUrl(inputUrl, deps.fetcher, undefined, deps.dnsCheck);
@@ -138,9 +140,18 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
       product = extractWalmartProduct(html, inputUrl, page.resolvedUrl);
       canonicalProductId = [diagnostics.canonicalProductId, walmartProductId(product.canonicalProductUrl ?? product.resolvedUrl)].find(usableWalmartProductId);
     } else {
-      await page.response.body?.cancel();
-      const asin = amazonAsinFromUrl(page.resolvedUrl);
-      if (!asin) throw new ProductError("MISSING_PRODUCT_ID", "extraction", "Amazon ASIN unavailable");
+      let identityHtml: string | undefined;
+      if (!amazonAsinFromUrl(page.resolvedUrl)) {
+        try { identityHtml = (await readLimitedTextWithSize(page.response)).text; }
+        catch { await page.response.body?.cancel(); }
+      } else await page.response.body?.cancel();
+      const identity = resolveAmazonIdentity(inputUrl, page.resolvedUrl, identityHtml);
+      const asin = identity.asin;
+      console.log(JSON.stringify({
+        event: "amazon_source_identity", ...base, hostname, asin,
+        sourceIdentityState: identity.sourceIdentityState,
+        sourceIdentitySource: identity.sourceIdentitySource
+      }));
       if (!deps.amazonProductProvider) throw new ProductError("AMAZON_CREATORS_AUTH_FAILED", "extraction", "Amazon Creators API is not configured");
       product = await deps.amazonProductProvider.product(asin, inputUrl, page.resolvedUrl, deps.requestId);
       canonicalProductId = asin;

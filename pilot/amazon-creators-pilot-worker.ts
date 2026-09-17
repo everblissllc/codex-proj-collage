@@ -4,9 +4,10 @@ import type { CopyProvider } from "../src/ai/provider";
 import { workerFetch, type FetchLike } from "../src/network/worker-fetch";
 import { BrowserScreenshotRenderer } from "../src/rendering/browser-renderer";
 import { renderAmazonCard } from "../src/rendering/render-card";
-import { resolveUrl } from "../src/stores/resolve-url";
+import { readLimitedTextWithSize, resolveUrl } from "../src/stores/resolve-url";
 import { validatePublicUrl } from "../src/stores/safe-url";
 import { amazonAsinFromUrl } from "../src/stores/amazon/diagnostics";
+import { resolveAmazonIdentity } from "../src/stores/amazon/identity";
 import { AmazonCreatorsApiClient, AmazonCreatorsAuthError, amazonCreatorsGetItemsEndpoint } from "../src/stores/amazon/creators-api-client";
 import { mapCreatorsItem } from "../src/stores/amazon/creators-api-product";
 import type { CreatorsItem } from "../src/stores/amazon/creators-api-types";
@@ -152,14 +153,20 @@ async function runPilot(env: Env): Promise<Response> {
     try {
       validatePublicUrl(originalUrl);
       const resolved = await resolveUrl(originalUrl, workerFetch);
-      await resolved.response.body?.cancel();
       const resolvedUrl = validatePublicUrl(resolved.resolvedUrl);
       if (!allowedAmazonHost(resolvedUrl.hostname)) throw new ProductError("UNSAFE_AMAZON_URL", "url", "Amazon redirect left approved hostname");
-      const asin = amazonAsinFromUrl(resolvedUrl.href);
-      if (asin !== requestedAsin) throw new ProductError("AMAZON_ASIN_MISMATCH", "extraction", "Resolved ASIN mismatch");
+      let identityHtml: string | undefined;
+      if (!amazonAsinFromUrl(resolvedUrl.href)) {
+        try { identityHtml = (await readLimitedTextWithSize(resolved.response)).text; }
+        catch { await resolved.response.body?.cancel(); }
+      } else await resolved.response.body?.cancel();
+      const identity = resolveAmazonIdentity(originalUrl, resolvedUrl.href, identityHtml);
+      const asin = identity.asin;
       result.resolvedHostname = resolvedUrl.hostname;
       result.redirectCount = resolved.redirectCount;
-      result.resolvedAsinMatches = true;
+      result.resolvedAsinMatches = asin === requestedAsin;
+      result.sourceIdentityState = identity.sourceIdentityState;
+      result.sourceIdentitySource = identity.sourceIdentitySource;
 
       activeAsin = asin;
       const item = await client.getItem(asin, requestId);
