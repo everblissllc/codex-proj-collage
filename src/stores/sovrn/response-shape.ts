@@ -1,5 +1,5 @@
 import { hostnameMatches } from "./merchant-registry";
-import type { SovrnApprovedMerchantFinding, SovrnStructuralOffer, SovrnStructuralSummary } from "./types";
+import type { SovrnApprovedMerchantFinding, SovrnPilotOfferSummary, SovrnPilotPriceSummary, SovrnStructuralOffer, SovrnStructuralSummary } from "./types";
 
 type Primitive = string | number | boolean;
 type Leaf = { path: string; key: string; value: Primitive; type: string };
@@ -112,6 +112,60 @@ export function describeSovrnResponse(value: unknown): SovrnStructuralSummary {
     topLevelType: typeOf(value), topLevelKeys: root ? Object.keys(root).sort() : [],
     resultArrayPath: selected.path, resultCount: selected.values.length,
     offers: selected.values.slice(0, 20).map(offer => describeOffer(offer, arrayPath))
+  };
+}
+
+function publicImageSummary(value: unknown): { present: boolean; https?: boolean; hostname?: string } {
+  if (typeof value !== "string" || !value.trim()) return { present: false };
+  try {
+    const url = new URL(value);
+    return { present: true, https: url.protocol === "https:", hostname: url.hostname };
+  } catch { return { present: true, https: false }; }
+}
+
+function exactPilotOffer(value: unknown, arrayPath: string): SovrnPilotOfferSummary {
+  const item = record(value) ?? {};
+  const merchant = record(item.merchant) ?? {};
+  const exactFields: Array<[string, unknown]> = [
+    ["merchant.name", merchant.name], ["merchant.id", merchant.id], ["name", item.name], ["id", item.id],
+    ["salePrice", item.salePrice], ["retailPrice", item.retailPrice], ["currency", item.currency],
+    ["discountRate", item.discountRate], ["affiliatable", item.affiliatable], ["deeplink", item.deeplink],
+    ["image", item.image], ["thumbnail", item.thumbnail]
+  ];
+  const all = leaves(item, `${arrayPath}[]`);
+  const stockFields = all.filter(leaf => keyLike(leaf.key, ["stock", "availability", "available"]))
+    .map(({ path, type, value: fieldValue }) => ({ path, type, value: fieldValue }));
+  const strongerIdentityFields = all.filter(leaf => /^(barcode|gtin|upc|ean|sku|mpn|product_?id)$/i.test(leaf.key))
+    .map(({ path, type, value: fieldValue }) => ({ path, type, value: fieldValue }));
+  return {
+    merchant: {
+      name: typeof merchant.name === "string" ? merchant.name : undefined,
+      id: typeof merchant.id === "string" || typeof merchant.id === "number" ? merchant.id : undefined
+    },
+    name: typeof item.name === "string" ? item.name : undefined,
+    id: typeof item.id === "string" || typeof item.id === "number" ? item.id : undefined,
+    salePrice: typeof item.salePrice === "number" ? item.salePrice : undefined,
+    retailPrice: typeof item.retailPrice === "number" ? item.retailPrice : undefined,
+    currency: typeof item.currency === "string" ? item.currency : undefined,
+    discountRate: typeof item.discountRate === "number" ? item.discountRate : undefined,
+    affiliatable: typeof item.affiliatable === "boolean" ? item.affiliatable : undefined,
+    deeplinkPresent: typeof item.deeplink === "string" && item.deeplink.length > 0,
+    image: publicImageSummary(item.image),
+    thumbnail: publicImageSummary(item.thumbnail),
+    fieldTypes: Object.fromEntries(exactFields.map(([path, fieldValue]) => [path, typeOf(fieldValue)])),
+    stockFields,
+    strongerIdentityFields
+  };
+}
+
+export function describeSovrnPriceResponse(value: unknown): SovrnPilotPriceSummary {
+  const root = record(value);
+  const selected = resultArray(value);
+  return {
+    topLevelType: typeOf(value),
+    topLevelKeys: root ? Object.keys(root).sort() : [],
+    resultCount: selected.values.length,
+    offers: selected.values.slice(0, 20).map(offer => exactPilotOffer(offer, selected.path ?? "$"))
   };
 }
 

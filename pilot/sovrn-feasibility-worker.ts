@@ -1,5 +1,5 @@
 import { SovrnApiError, SovrnClient } from "../src/stores/sovrn/client";
-import { describeSovrnResponse, inspectApprovedMerchants } from "../src/stores/sovrn/response-shape";
+import { describeSovrnPriceResponse, inspectApprovedMerchants } from "../src/stores/sovrn/response-shape";
 import { buildSovrnPlainlink } from "../src/stores/sovrn/plainlink";
 import { sovrnMerchantAdapters } from "../src/stores/sovrn/merchant-registry";
 import type { SovrnStoreId } from "../src/stores/sovrn/types";
@@ -73,24 +73,31 @@ export default {
     });
     try {
       const domains = candidates.flatMap(candidate => [...sovrnMerchantAdapters[candidate.store].domains]);
-      const merchantResponse = await client.approvedMerchantsDetailed(domains, "sovrn-feasibility");
-      const merchantFindings = inspectApprovedMerchants(merchantResponse.value, domains);
-      const merchants = { httpStatus: merchantResponse.httpStatus, structure: describeSovrnResponse(merchantResponse.value), findings: merchantFindings };
+      let merchantFindings: ReturnType<typeof inspectApprovedMerchants> = domains.map(domain => ({
+        domain, found: false, approved: false, statusFields: [], identityFields: []
+      }));
+      let merchants: unknown;
+      try {
+        const merchantResponse = await client.approvedMerchantsDetailed(domains, "sovrn-feasibility");
+        merchantFindings = inspectApprovedMerchants(merchantResponse.value, domains);
+        merchants = { httpStatus: merchantResponse.httpStatus, findings: merchantFindings };
+      } catch (error) {
+        merchants = {
+          httpStatus: error instanceof SovrnApiError ? error.httpStatus : undefined,
+          errorCode: error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "SOVRN_PILOT_FAILED"
+        };
+      }
       const results = [];
-      for (const candidate of candidates) {
+      for (const [index, candidate] of candidates.entries()) {
         try {
           const lookup = buildSovrnPlainlink(candidate.url, candidate.store);
           const domain = sovrnMerchantAdapters[candidate.store].domains[0];
-          const approved = merchantFindings.find(finding => finding.domain === domain)?.approved === true;
-          if (!approved) {
-            results.push({ store: candidate.store, hostname: new URL(lookup.plainlink).hostname, approved: false, lookupSkipped: true, errorCode: "SOVRN_MERCHANT_NOT_APPROVED" });
-            continue;
-          }
+          const approvedMetadata = merchantFindings.find(finding => finding.domain === domain)?.approved === true;
           const response = await client.compareByPlainlinkDetailed({ plainlink: lookup.plainlink, store: candidate.store, requestId: "sovrn-feasibility" });
           results.push({
-            store: candidate.store, hostname: new URL(lookup.plainlink).hostname, approved: true, httpStatus: response.httpStatus,
+            store: candidate.store, hostname: new URL(lookup.plainlink).hostname, approvedMetadata, httpStatus: response.httpStatus,
             pathShape: new URL(lookup.plainlink).pathname.replace(/[A-Za-z0-9]{6,}/g, ":id"),
-            productIdentityPresent: Boolean(lookup.productIdentity), structure: describeSovrnResponse(response.value)
+            productIdentityPresent: Boolean(lookup.productIdentity), structure: describeSovrnPriceResponse(response.value)
           });
         } catch (error) {
           results.push({
@@ -99,6 +106,7 @@ export default {
             errorCode: error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "SOVRN_PILOT_FAILED"
           });
         }
+        if (index < candidates.length - 1) await new Promise(resolve => setTimeout(resolve, 250));
       }
       return Response.json({ success: true, source: "sovrn-price-comparison", market: "usd_en", merchants, results });
     } catch (error) {

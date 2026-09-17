@@ -9,7 +9,7 @@ const { SovrnClient } = req("stores/sovrn/client.js");
 const { sovrnStoreForHostname } = req("stores/sovrn/merchant-registry.js");
 const { buildSovrnPlainlink } = req("stores/sovrn/plainlink.js");
 const { mapSovrnProduct, buildSovrnFacebookPost } = req("stores/sovrn/product-mapper.js");
-const { describeSovrnResponse, inspectApprovedMerchants } = req("stores/sovrn/response-shape.js");
+const { describeSovrnPriceResponse, describeSovrnResponse, inspectApprovedMerchants } = req("stores/sovrn/response-shape.js");
 const { WorkersAICopyProvider } = req("ai/workers-ai-provider.js");
 
 const config = { secretKey: "secret-value", siteApiKey: "site-value", market: "usd_en", campaignId: "123" };
@@ -164,6 +164,28 @@ test("sanitized shape discovery emits keys/types/presence without product URL or
   const serialized = JSON.stringify(summary);
   assert.match(serialized, /Visible Pilot Title|secret\.example/);
   assert.doesNotMatch(serialized, /tracked\.example|secret-value/);
+});
+
+test("price response discovery exposes exact safe offer fields but never deeplink values", () => {
+  const raw = [{
+    merchant: { name: "Target", id: 390 }, name: "CeraVe Face Wash", id: 123,
+    salePrice: 15.99, retailPrice: 17.99, currency: "USD", discountRate: 11,
+    affiliatable: true, deeplink: "https://redirect.viglink.com/?secret=hidden",
+    image: "https://target.scene7.com/item.jpg", thumbnail: "https://target.scene7.com/thumb.jpg",
+    availability: "in stock", gtin: "0012345678905"
+  }];
+  const summary = describeSovrnPriceResponse(raw);
+  assert.equal(summary.resultCount, 1);
+  assert.deepEqual(summary.offers[0].merchant, { name: "Target", id: 390 });
+  assert.equal(summary.offers[0].name, "CeraVe Face Wash");
+  assert.equal(summary.offers[0].salePrice, 15.99);
+  assert.equal(summary.offers[0].retailPrice, 17.99);
+  assert.equal(summary.offers[0].deeplinkPresent, true);
+  assert.deepEqual(summary.offers[0].image, { present: true, https: true, hostname: "target.scene7.com" });
+  assert.equal(summary.offers[0].stockFields[0].value, "in stock");
+  assert.equal(summary.offers[0].strongerIdentityFields[0].value, "0012345678905");
+  const serialized = JSON.stringify(summary);
+  assert.doesNotMatch(serialized, /redirect\.viglink|secret=hidden|item\.jpg|thumb\.jpg/);
 });
 
 test("approved merchant discovery uses presence in the official collection without exposing raw rows", () => {

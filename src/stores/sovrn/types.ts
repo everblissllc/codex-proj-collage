@@ -63,6 +63,30 @@ export type SovrnStructuralSummary = {
   offers: SovrnStructuralOffer[];
 };
 
+export type SovrnPilotOfferSummary = {
+  merchant: { name?: string; id?: string | number };
+  name?: string;
+  id?: string | number;
+  salePrice?: number;
+  retailPrice?: number;
+  currency?: string;
+  discountRate?: number;
+  affiliatable?: boolean;
+  deeplinkPresent: boolean;
+  image: { present: boolean; https?: boolean; hostname?: string };
+  thumbnail: { present: boolean; https?: boolean; hostname?: string };
+  fieldTypes: Record<string, string>;
+  stockFields: Array<{ path: string; type: string; value: string | number | boolean }>;
+  strongerIdentityFields: Array<{ path: string; type: string; value: string | number | boolean }>;
+};
+
+export type SovrnPilotPriceSummary = {
+  topLevelType: string;
+  topLevelKeys: string[];
+  resultCount: number;
+  offers: SovrnPilotOfferSummary[];
+};
+
 export type SovrnApprovedMerchantFinding = {
   domain: string;
   found: boolean;
