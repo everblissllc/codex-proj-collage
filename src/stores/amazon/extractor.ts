@@ -41,9 +41,12 @@ function primaryPriceScope(html: string): string {
 function moneyTexts(scope: string, kind: "current" | "old"): string[] {
   const results: string[] = [];
   if (kind === "current") {
-    for (const match of scope.matchAll(/<span\b(?=[^>]*\bclass\s*=\s*["'][^"']*(?:priceToPay|apex-pricetopay-value)[^"']*["'])[^>]*>[\s\S]{0,1200}?<span\b[^>]*\bclass\s*=\s*["'][^"']*a-price-whole[^"']*["'][^>]*>([\s\S]*?)<\/span>\s*<span\b[^>]*\bclass\s*=\s*["'][^"']*a-price-fraction[^"']*["'][^>]*>([\s\S]*?)<\/span>/gi)) {
-      const whole = text(match[1]).replace(/\D/g, "");
-      const fraction = text(match[2]).replace(/\D/g, "").padEnd(2, "0").slice(0, 2);
+    for (const match of scope.matchAll(/<(?:span|div)\b(?=[^>]*\bclass\s*=\s*["'][^"']*(?:priceToPay|apex-pricetopay-value)[^"']*["'])[^>]*>/gi)) {
+      const block = scope.slice(match.index, match.index + 2500);
+      const wholeMatch = block.match(/<span\b[^>]*\bclass\s*=\s*["'][^"']*a-price-whole[^"']*["'][^>]*>\s*([\d,]+)/i);
+      const fractionMatch = block.match(/<span\b[^>]*\bclass\s*=\s*["'][^"']*a-price-fraction[^"']*["'][^>]*>\s*(\d{1,2})/i);
+      const whole = wholeMatch?.[1]?.replace(/\D/g, "") ?? "";
+      const fraction = (fractionMatch?.[1] ?? "00").padEnd(2, "0").slice(0, 2);
       if (whole) results.push(`$${whole}.${fraction}`);
     }
   }

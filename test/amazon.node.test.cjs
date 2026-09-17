@@ -73,6 +73,15 @@ test("Amazon reconstructs a primary visible price when a-price offscreen text is
   assert.equal(extracted.product.currentPrice.formatted, "$24.99");
 });
 
+test("Amazon reconstructs a split primary price inside a div priceToPay wrapper", () => {
+  const liveShape = sale
+    .replace(/<script type="application\/ld\+json">[\s\S]*?<\/script>/, "")
+    .replace('<span class="a-price priceToPay"><span class="a-offscreen">$24.99</span><span aria-hidden="true"><span class="a-price-whole">24</span><span class="a-price-fraction">99</span></span></span>', '<div class="priceToPay"><span class="a-offscreen"> </span><span aria-hidden="true"><span class="a-price-whole">24<span class="a-price-decimal">.</span></span><span class="a-size-small">separator</span><span class="a-price-fraction">99</span></span></div>');
+  const extracted = extractAmazonProduct(liveShape, affiliate, saleUrl);
+  assert.equal(extracted.priceSource, "primary-offer-dom");
+  assert.equal(extracted.product.currentPrice.formatted, "$24.99");
+});
+
 test("Amazon rejects unavailable or non-new structured offers without a primary purchase offer", () => {
   const noPurchase = sale.replace(/<div id="desktop_buybox">[\s\S]*?<\/div>/, "");
   const unavailable = noPurchase
