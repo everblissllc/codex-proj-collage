@@ -53,6 +53,15 @@ test("retailer plainlinks remove known tracking but preserve exact original and 
   assert.equal(result.productIdentity, "12345678");
   const sephora = buildSovrnPlainlink("https://www.sephora.com/product/name-P12345?skuId=9988&utm_medium=social", "sephora");
   assert.equal(sephora.plainlink, "https://www.sephora.com/product/name-P12345?skuId=9988");
+  const ecosmetics = buildSovrnPlainlink(
+    "https://www.ecosmetics.com/product/no-7-bonding-oil-2-2/?attribute_pa_olaplex_size=olaplex_1oz&utm_source=pilot",
+    "ecosmetics"
+  );
+  assert.equal(
+    ecosmetics.plainlink,
+    "https://www.ecosmetics.com/product/no-7-bonding-oil-2-2/?attribute_pa_olaplex_size=olaplex_1oz"
+  );
+  assert.equal(ecosmetics.productIdentity, "no-7-bonding-oil-2-2");
   expectCode(() => buildSovrnPlainlink("https://evil.example.net/p/item/-/A-12345678", "target"), "SOVRN_MERCHANT_MISMATCH");
 });
 
@@ -222,6 +231,25 @@ test("feasibility rejects non-affiliatable or identity-ambiguous offers and clas
   assert.equal(classifySovrnReferencePrice(10, 9), "inconsistent");
   assert.equal(classifySovrnReferencePrice(10, 0), "invalid_or_absent");
   assert.equal(classifySovrnReferencePrice(10, undefined), "invalid_or_absent");
+});
+
+test("eCosmetics live response shape is retailer-matched and zero retailPrice is not a reference price", () => {
+  const structure = describeSovrnPriceResponse([{
+    merchant: { name: "eCosmetics.com", id: 153726 }, name: "No. 7 Bonding Oil", id: 987,
+    salePrice: 32, retailPrice: 0, currency: "USD", affiliatable: true,
+    image: "https://images.example.org/bonding-oil.jpg", thumbnail: "https://images.example.org/bonding-oil-thumb.jpg",
+    deeplink: "https://credential-bearing.example/never-emit"
+  }]);
+  const summary = summarizeSovrnPilotLookup({
+    store: "ecosmetics", httpStatus: 200, lookupIdentity: "no-7-bonding-oil-2-2", structure
+  });
+  assert.equal(summary.sameRetailerMatch, true);
+  assert.equal(summary.sameRetailerOffer.merchant.name, "eCosmetics.com");
+  assert.equal(summary.sameRetailerOffer.salePrice, 32);
+  assert.equal(summary.referencePriceClassification, "invalid_or_absent");
+  assert.equal(summary.identityConfidence, "ambiguous");
+  assert.equal(summary.technicalUsability, false);
+  assert.doesNotMatch(JSON.stringify(summary), /credential-bearing/);
 });
 
 test("exact product mismatch and ambiguous source offers fail safely", () => {

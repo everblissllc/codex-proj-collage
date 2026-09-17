@@ -41,7 +41,7 @@ export const sovrnMerchantAdapters: Readonly<Record<SovrnStoreId, SovrnMerchantA
   ecosmetics: {
     store: "ecosmetics", domains: ["ecosmetics.com"], merchantNames: ["ecosmetics", "ecosmetics.com", "eCosmetics"],
     productIdentity: url => pathMatch(url, /\/product\/([^/?#]+)/i),
-    productSignificantParams: ["variant"]
+    productSignificantParams: ["variant", "attribute_pa_olaplex_size"]
   },
   bubble: {
     store: "bubble", domains: ["hellobubble.com"], merchantNames: ["bubble", "hellobubble", "hellobubble.com"],
