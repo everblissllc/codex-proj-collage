@@ -59,20 +59,26 @@ jobs:
           set -euo pipefail
           pilot_secret=$(openssl rand -hex 32)
           echo "::add-mask::$pilot_secret"
-          printf '%s' "$AMAZON_CREATORS_CLIENT_ID" | npx wrangler secret put AMAZON_CREATORS_CLIENT_ID --config wrangler.amazon-creators-pilot.jsonc
-          printf '%s' "$AMAZON_CREATORS_CLIENT_SECRET" | npx wrangler secret put AMAZON_CREATORS_CLIENT_SECRET --config wrangler.amazon-creators-pilot.jsonc
-          printf '%s' "$AMAZON_CREATORS_CREDENTIAL_VERSION" | npx wrangler secret put AMAZON_CREATORS_CREDENTIAL_VERSION --config wrangler.amazon-creators-pilot.jsonc
-          printf '%s' "$AMAZON_CREATORS_MARKETPLACE" | npx wrangler secret put AMAZON_CREATORS_MARKETPLACE --config wrangler.amazon-creators-pilot.jsonc
-          printf '%s' "$AMAZON_CREATORS_PARTNER_TAG" | npx wrangler secret put AMAZON_CREATORS_PARTNER_TAG --config wrangler.amazon-creators-pilot.jsonc
-          printf '%s' "$pilot_secret" | npx wrangler secret put PILOT_RUN_SECRET --config wrangler.amazon-creators-pilot.jsonc
+          export PILOT_RUN_SECRET="$pilot_secret"
+          node -e '
+            const keys = [
+              "AMAZON_CREATORS_CLIENT_ID",
+              "AMAZON_CREATORS_CLIENT_SECRET",
+              "AMAZON_CREATORS_CREDENTIAL_VERSION",
+              "AMAZON_CREATORS_MARKETPLACE",
+              "AMAZON_CREATORS_PARTNER_TAG",
+              "PILOT_RUN_SECRET"
+            ];
+            process.stdout.write(JSON.stringify(Object.fromEntries(keys.map(key => [key, process.env[key]])));
+          ' | npx wrangler secret bulk --config wrangler.amazon-creators-pilot.jsonc
           echo "PILOT_RUN_SECRET=$pilot_secret" >> "$GITHUB_ENV"
       - name: Run sequential Creators API pilot
         id: run_pilot
         shell: bash
         run: |
           set -euo pipefail
-          sleep 1
-          for attempt in 1 2 3; do
+          sleep 2
+          for attempt in {1..10}; do
             http_status=$(curl --silent --show-error --max-time 180 \
               --request POST \
               --header "x-pilot-secret: ${PILOT_RUN_SECRET}" \
@@ -83,11 +89,10 @@ jobs:
               break
             fi
             set +e
-            node pilot/report-amazon-creators-bootstrap.mjs /tmp/amazon-creators-pilot.json "$http_status"
+            node pilot/report-amazon-creators-bootstrap.mjs /tmp/amazon-creators-pilot.json "$http_status" "$attempt"
             diagnostic_status=$?
             set -e
-            if [[ "$diagnostic_status" == "75" && "$attempt" -lt 3 ]]; then
-              echo "Pilot configuration is not ready; retrying bootstrap after 2 seconds."
+            if [[ "$diagnostic_status" == "75" && "$attempt" -lt 10 ]]; then
               sleep 2
               continue
             fi
