@@ -1,4 +1,7 @@
 {
   "extends": "./tsconfig.json",
-  "include": ["src", "pilot/amazon-creators-pilot-worker.ts"]
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types", "node"]
+  },
+  "include": ["src", "pilot/amazon-creators-direct-runner.ts"]
 }

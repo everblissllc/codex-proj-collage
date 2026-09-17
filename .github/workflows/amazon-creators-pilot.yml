@@ -10,8 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     environment: amazon-pilot
     env:
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       AMAZON_CREATORS_CLIENT_ID: ${{ secrets.AMAZON_CREATORS_CLIENT_ID }}
       AMAZON_CREATORS_CLIENT_SECRET: ${{ secrets.AMAZON_CREATORS_CLIENT_SECRET }}
       AMAZON_CREATORS_CREDENTIAL_VERSION: ${{ vars.AMAZON_CREATORS_CREDENTIAL_VERSION }}
@@ -29,95 +27,28 @@ jobs:
         run: |
           set -euo pipefail
           missing=()
-          for key in CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN AMAZON_CREATORS_CLIENT_ID AMAZON_CREATORS_CLIENT_SECRET AMAZON_CREATORS_CREDENTIAL_VERSION AMAZON_CREATORS_MARKETPLACE AMAZON_CREATORS_PARTNER_TAG; do
+          for key in AMAZON_CREATORS_CLIENT_ID AMAZON_CREATORS_CLIENT_SECRET AMAZON_CREATORS_CREDENTIAL_VERSION AMAZON_CREATORS_MARKETPLACE AMAZON_CREATORS_PARTNER_TAG; do
             if [[ -z "${!key:-}" ]]; then missing+=("$key"); fi
           done
           if (( ${#missing[@]} > 0 )); then
             printf 'Missing amazon-pilot configuration key: %s\n' "${missing[@]}" >&2
             exit 2
           fi
-      - name: Validate source and pilot bundle
+          if [[ "$AMAZON_CREATORS_CREDENTIAL_VERSION" != "3.1" ]]; then
+            printf 'Invalid amazon-pilot configuration key: AMAZON_CREATORS_CREDENTIAL_VERSION\n' >&2
+            exit 2
+          fi
+      - name: Validate source and direct pilot
         run: |
           npm run typecheck
           npm test
           git diff --check
           node scripts/check-smoke-config.mjs
           npx tsc --noEmit -p tsconfig.amazon-creators-pilot.json
-          npx wrangler deploy --dry-run --config wrangler.amazon-creators-pilot.jsonc
-      - name: Deploy isolated pilot Worker
-        id: deploy
+      - name: Run one direct Creators API credential test
         shell: bash
         run: |
           set -euo pipefail
-          npx wrangler deploy --config wrangler.amazon-creators-pilot.jsonc | tee /tmp/amazon-creators-pilot-deploy.log
-          worker_url=$(grep -Eo 'https://[^[:space:]]+\.workers\.dev' /tmp/amazon-creators-pilot-deploy.log | tail -1)
-          test -n "$worker_url"
-          echo "worker_url=$worker_url" >> "$GITHUB_OUTPUT"
-      - name: Provision isolated pilot secrets
-        shell: bash
-        run: |
-          set -euo pipefail
-          pilot_secret=$(openssl rand -hex 32)
-          echo "::add-mask::$pilot_secret"
-          export PILOT_RUN_SECRET="$pilot_secret"
-          node -e '
-            const keys = [
-              "AMAZON_CREATORS_CLIENT_ID",
-              "AMAZON_CREATORS_CLIENT_SECRET",
-              "AMAZON_CREATORS_CREDENTIAL_VERSION",
-              "AMAZON_CREATORS_MARKETPLACE",
-              "AMAZON_CREATORS_PARTNER_TAG",
-              "PILOT_RUN_SECRET"
-            ];
-            process.stdout.write(JSON.stringify(Object.fromEntries(keys.map(key => [key, process.env[key]]))));
-          ' | npx wrangler secret bulk --config wrangler.amazon-creators-pilot.jsonc
-          echo "PILOT_RUN_SECRET=$pilot_secret" >> "$GITHUB_ENV"
-      - name: Run sequential Creators API pilot
-        id: run_pilot
-        shell: bash
-        run: |
-          set -euo pipefail
-          sleep 2
-          for attempt in {1..10}; do
-            http_status=$(curl --silent --show-error --max-time 180 \
-              --request POST \
-              --header "x-pilot-secret: ${PILOT_RUN_SECRET}" \
-              "${{ steps.deploy.outputs.worker_url }}/pilot" \
-              --output /tmp/amazon-creators-pilot.json \
-              --write-out '%{http_code}')
-            if [[ "$http_status" == "200" || "$http_status" == "502" ]]; then
-              break
-            fi
-            set +e
-            node pilot/report-amazon-creators-bootstrap.mjs /tmp/amazon-creators-pilot.json "$http_status" "$attempt"
-            diagnostic_status=$?
-            set -e
-            if [[ "$diagnostic_status" == "75" && "$attempt" -lt 10 ]]; then
-              sleep 2
-              continue
-            fi
-            exit "$diagnostic_status"
-          done
-          node pilot/report-amazon-creators-pilot.mjs /tmp/amazon-creators-pilot.json /tmp/amazon-card-pilot
-      - name: Upload Amazon card artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: amazon-card-pilot
-          path: /tmp/amazon-card-pilot/*.png
-          if-no-files-found: ignore
-          retention-days: 7
-      - name: Delete isolated pilot Worker
-        if: always() && steps.deploy.outcome != 'skipped'
-        shell: bash
-        run: |
-          set -euo pipefail
-          status=$(curl --silent --show-error --output /tmp/amazon-creators-pilot-delete.json --write-out '%{http_code}' \
-            --request DELETE \
-            --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/affiliate-deal-card-amazon-creators-pilot")
-          if [[ "$status" != "200" && "$status" != "404" ]]; then
-            echo "Temporary pilot Worker cleanup failed with HTTP $status." >&2
-            exit 1
-          fi
-          echo "Temporary pilot Worker cleanup completed."
+          pilot_out="$RUNNER_TEMP/amazon-creators-direct-pilot"
+          npx tsc -p tsconfig.amazon-creators-pilot.json --noEmit false --outDir "$pilot_out"
+          node "$pilot_out/pilot/amazon-creators-direct-runner.js"
