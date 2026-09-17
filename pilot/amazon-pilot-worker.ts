@@ -24,9 +24,31 @@ type BrowserObservation = {
   lastFinalHostAllowed?: boolean;
   lastBrowserMsUsed?: number;
   contentDiagnostics?: AmazonHtmlDiagnostics;
+  contentPriceShape?: PriceShape;
 };
 
-type FetchObservation = { amazonStatuses: number[]; diagnostics?: AmazonHtmlDiagnostics };
+type PriceShape = {
+  hasPriceToPayClass: boolean;
+  hasApexPriceToPayClass: boolean;
+  hasPriceWhole: boolean;
+  hasPriceFraction: boolean;
+  hasOffscreenDollar: boolean;
+  hasPriceblockId: boolean;
+  hasTwisterPrice: boolean;
+};
+type FetchObservation = { amazonStatuses: number[]; diagnostics?: AmazonHtmlDiagnostics; priceShape?: PriceShape };
+
+function priceShape(html: string): PriceShape {
+  return {
+    hasPriceToPayClass: /\bclass\s*=\s*["'][^"']*priceToPay[^"']*["']/i.test(html),
+    hasApexPriceToPayClass: /\bclass\s*=\s*["'][^"']*apex[^"']*price[^"']*pay[^"']*["']/i.test(html),
+    hasPriceWhole: /\bclass\s*=\s*["'][^"']*a-price-whole[^"']*["']/i.test(html),
+    hasPriceFraction: /\bclass\s*=\s*["'][^"']*a-price-fraction[^"']*["']/i.test(html),
+    hasOffscreenDollar: /\bclass\s*=\s*["'][^"']*a-offscreen[^"']*["'][^>]*>\s*\$/i.test(html),
+    hasPriceblockId: /\bid\s*=\s*["']priceblock_[^"']+["']/i.test(html),
+    hasTwisterPrice: /\b(?:id|class)\s*=\s*["'][^"']*twister[^"']*price[^"']*["']/i.test(html)
+  };
+}
 
 class MemoryCardCache implements CardCache {
   private readonly entries = new Map<string, { shortTitle: string; card: CardImage }>();
@@ -75,7 +97,10 @@ function instrumentedBrowser(env: Env, observation: BrowserObservation): Browser
             const hostname = new URL(payload.meta.finalUrl).hostname.toLowerCase();
             observation.lastFinalHostname = hostname;
             observation.lastFinalHostAllowed = hostname === "amazon.com" || hostname.endsWith(".amazon.com");
-            if (typeof (payload as { result?: unknown }).result === "string") observation.contentDiagnostics = inspectAmazonHtml((payload as { result: string }).result, payload.meta.finalUrl);
+            if (typeof (payload as { result?: unknown }).result === "string") {
+              observation.contentDiagnostics = inspectAmazonHtml((payload as { result: string }).result, payload.meta.finalUrl);
+              observation.contentPriceShape = priceShape((payload as { result: string }).result);
+            }
           }
         }
         return response;
@@ -99,6 +124,7 @@ function observedFetcher(observation: FetchObservation): FetchLike {
       if (response.ok && response.headers.get("content-type")?.toLowerCase().includes("text/html")) {
         const html = await response.clone().text();
         observation.diagnostics = inspectAmazonHtml(html, raw);
+        observation.priceShape = priceShape(html);
       }
     }
     return response;
@@ -219,7 +245,9 @@ async function runPilot(env: Env) {
         errorCode: String(failure.code ?? "PILOT_PRODUCT_FAILED"),
         errorStage: String(failure.stage ?? "unknown"),
         workerDiagnostics: fetchObservation.diagnostics,
+        workerPriceShape: fetchObservation.priceShape,
         browserDiagnostics: fallbackUsed ? browserObservation.contentDiagnostics : undefined,
+        browserPriceShape: fallbackUsed ? browserObservation.contentPriceShape : undefined,
         aiCalls: copy.calls - aiBefore,
         renderCalls: renderer.calls - renderBefore,
         browserScreenshotAttempts: browserObservation.screenshotCalls - screenshotBefore
