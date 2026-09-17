@@ -1,0 +1,94 @@
+name: Sovrn Feasibility Pilot
+
+on:
+  push:
+    branches:
+      - test/sovrn-feasibility
+
+jobs:
+  pilot:
+    runs-on: ubuntu-latest
+    environment: sovrn-pilot
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      SOVRN_SECRET_KEY: ${{ secrets.SOVRN_SECRET_KEY }}
+      SOVRN_SITE_API_KEY: ${{ secrets.SOVRN_SITE_API_KEY }}
+      SOVRN_CAMPAIGN_ID: ${{ secrets.SOVRN_CAMPAIGN_ID }}
+      SOVRN_MARKET: ${{ vars.SOVRN_MARKET }}
+      SOVRN_PILOT_PLAINLINKS_JSON: ${{ vars.SOVRN_PILOT_PLAINLINKS_JSON }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Validate required configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          for key in CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN SOVRN_SECRET_KEY SOVRN_SITE_API_KEY SOVRN_CAMPAIGN_ID SOVRN_MARKET SOVRN_PILOT_PLAINLINKS_JSON; do
+            if [[ -z "${!key:-}" ]]; then missing+=("$key"); fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing sovrn-pilot configuration key: %s\n' "${missing[@]}" >&2
+            exit 2
+          fi
+      - name: Validate source and pilot bundle
+        run: |
+          npm run typecheck
+          npm test
+          git diff --check
+          node scripts/check-smoke-config.mjs
+          npx tsc --noEmit -p tsconfig.sovrn-pilot.json
+          npx wrangler deploy --dry-run --config wrangler.sovrn-pilot.jsonc
+      - name: Deploy isolated feasibility Worker
+        id: deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx wrangler deploy --config wrangler.sovrn-pilot.jsonc | tee /tmp/sovrn-pilot-deploy.log
+          worker_url=$(grep -Eo 'https://[^[:space:]]+\.workers\.dev' /tmp/sovrn-pilot-deploy.log | tail -1)
+          test -n "$worker_url"
+          echo "worker_url=$worker_url" >> "$GITHUB_OUTPUT"
+      - name: Provision isolated pilot bindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          pilot_secret=$(openssl rand -hex 32)
+          echo "::add-mask::$pilot_secret"
+          export PILOT_RUN_SECRET="$pilot_secret"
+          node -e '
+            const keys = ["SOVRN_SECRET_KEY", "SOVRN_SITE_API_KEY", "SOVRN_CAMPAIGN_ID", "SOVRN_MARKET", "SOVRN_PILOT_PLAINLINKS_JSON", "PILOT_RUN_SECRET"];
+            process.stdout.write(JSON.stringify(Object.fromEntries(keys.map(key => [key, process.env[key]]))));
+          ' | npx wrangler secret bulk --config wrangler.sovrn-pilot.jsonc
+          echo "PILOT_RUN_SECRET=$pilot_secret" >> "$GITHUB_ENV"
+      - name: Run sanitized Sovrn shape pilot
+        shell: bash
+        run: |
+          set -euo pipefail
+          sleep 2
+          status=$(curl --silent --show-error --max-time 180 --request POST \
+            --header "x-pilot-secret: ${PILOT_RUN_SECRET}" \
+            "${{ steps.deploy.outputs.worker_url }}/pilot" \
+            --output /tmp/sovrn-pilot.json --write-out '%{http_code}')
+          if [[ "$status" != "200" && "$status" != "502" ]]; then
+            echo "Sovrn pilot returned unexpected HTTP $status." >&2
+            exit 2
+          fi
+          node pilot/report-sovrn-feasibility.mjs /tmp/sovrn-pilot.json
+      - name: Delete isolated feasibility Worker
+        if: always() && steps.deploy.outcome != 'skipped'
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=$(curl --silent --show-error --output /tmp/sovrn-pilot-delete.json --write-out '%{http_code}' \
+            --request DELETE --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/affiliate-deal-card-sovrn-feasibility")
+          if [[ "$status" != "200" && "$status" != "404" ]]; then
+            echo "Temporary Sovrn pilot cleanup failed with HTTP $status." >&2
+            exit 1
+          fi
+          echo "Temporary Sovrn pilot Worker cleanup completed."
