@@ -12,6 +12,7 @@ const { merchantMatchesStore, sovrnStoreForHostname } = req("stores/sovrn/mercha
 const { buildSovrnPlainlink } = req("stores/sovrn/plainlink.js");
 const { mapSovrnProduct, buildSovrnFacebookPost } = req("stores/sovrn/product-mapper.js");
 const { describeSovrnPriceResponse, describeSovrnResponse, inspectApprovedMerchants } = req("stores/sovrn/response-shape.js");
+const { inspectSovrnSourceIdentity } = req("stores/sovrn/source-identity-feasibility.js");
 const { WorkersAICopyProvider } = req("ai/workers-ai-provider.js");
 
 const config = { secretKey: "secret-value", siteApiKey: "site-value", market: "usd_en", campaignId: "123" };
@@ -250,6 +251,53 @@ test("eCosmetics live response shape is retailer-matched and zero retailPrice is
   assert.equal(summary.identityConfidence, "ambiguous");
   assert.equal(summary.technicalUsability, false);
   assert.doesNotMatch(JSON.stringify(summary), /credential-bearing/);
+});
+
+test("source identity inspection reports only canonical, JSON-LD, and matching eCosmetics variant state", () => {
+  const variation = JSON.stringify([{
+    variation_id: 4411,
+    sku: "OLAPLEX-1OZ",
+    attributes: { attribute_pa_olaplex_size: "olaplex_1oz" },
+    image: { url: "https://secret.example/image.jpg" }
+  }, {
+    variation_id: 5522,
+    sku: "OLAPLEX-2OZ",
+    attributes: { attribute_pa_olaplex_size: "olaplex_2oz" }
+  }]).replaceAll('"', "&quot;");
+  const html = `<html><head>
+    <link rel="canonical" href="https://www.ecosmetics.com/product/no-7-bonding-oil-2-2/">
+    <meta property="og:title" content="No. 7 Bonding Oil">
+    <script type="application/ld+json">{"@type":"Product","name":"No. 7 Bonding Oil","sku":"OLAPLEX-FAMILY"}</script>
+    </head><body><form data-product_variations="${variation}"></form></body></html>`;
+  const summary = inspectSovrnSourceIdentity({
+    store: "ecosmetics",
+    sourceUrl: "https://www.ecosmetics.com/product/no-7-bonding-oil-2-2/?attribute_pa_olaplex_size=olaplex_1oz",
+    resolvedUrl: "https://www.ecosmetics.com/product/no-7-bonding-oil-2-2/?attribute_pa_olaplex_size=olaplex_1oz",
+    httpStatus: 200,
+    contentType: "text/html",
+    responseByteLength: html.length,
+    redirectCount: 0,
+    html
+  });
+  assert.equal(summary.sourceProductId, "no-7-bonding-oil-2-2");
+  assert.deepEqual(summary.variantQuery, { attribute_pa_olaplex_size: "olaplex_1oz" });
+  assert.equal(summary.jsonLdProducts[0].sku, "OLAPLEX-FAMILY");
+  assert.deepEqual(summary.matchedVariations, [{
+    variationId: "4411", sku: "OLAPLEX-1OZ", attributes: { attribute_pa_olaplex_size: "olaplex_1oz" }
+  }]);
+  assert.doesNotMatch(JSON.stringify(summary), /secret\.example/);
+});
+
+test("source identity inspection rejects a cross-retailer final hostname", () => {
+  assert.throws(() => inspectSovrnSourceIdentity({
+    store: "target",
+    sourceUrl: "https://www.target.com/p/item/-/A-81616326",
+    resolvedUrl: "https://evil.example.org/p/item/-/A-81616326",
+    httpStatus: 200,
+    responseByteLength: 1,
+    redirectCount: 1,
+    html: "x"
+  }), /SOURCE_HOST_MISMATCH/);
 });
 
 test("exact product mismatch and ambiguous source offers fail safely", () => {
