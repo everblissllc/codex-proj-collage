@@ -393,6 +393,16 @@ test("Creators LIST_PRICE retains list-price semantics while WAS_PRICE is reject
   assert.equal(wasPrice.oldPrice, undefined);
   assert.equal(wasPrice.amazon.referencePriceType, undefined);
   assert.equal(wasPrice.amazon.savings, undefined);
+  assert.equal(buildFacebookPost(wasPrice, "ESR Magnetic Car Charger", "#Ad"), `#Ad 🚨 ESR Magnetic Car Charger is now $24.99.\n\n👉 ${affiliate}`);
+});
+
+test("Amazon Facebook copy uses current price only and never treats untyped reference data as was-price", () => {
+  const currentOnly = mapCreatorsItem(creatorsItem(), "B08HNBHSQV", affiliate, saleUrl);
+  assert.equal(buildFacebookPost(currentOnly, "ESR Magnetic Car Charger", "#Ad"), `#Ad 🚨 ESR Magnetic Car Charger is now $24.99.\n\n👉 ${affiliate}`);
+  const untypedReference = { ...currentOnly, oldPrice: { value: 39.99, formatted: "$39.99", currency: "USD" } };
+  const copy = buildFacebookPost(untypedReference, "ESR Magnetic Car Charger", "#Ad");
+  assert.equal(copy, `#Ad 🚨 ESR Magnetic Car Charger is now $24.99.\n\n👉 ${affiliate}`);
+  assert.doesNotMatch(copy, /\bwas\b/i);
 });
 
 test("Creators reference price is omitted when not higher, currency differs, or semantics are unsupported", () => {
@@ -459,15 +469,46 @@ test("Creators product rejects missing price, title, image, ASIN mismatch, and n
   assert.throws(() => mapCreatorsItem(creatorsItem({ parentASIN: "B08HNBHSQV", offersV2: { listings: [] } }), "B08HNBHSQV", affiliate, saleUrl), { code: "AMAZON_NO_PURCHASABLE_OFFER" });
 });
 
-test("Amazon card template renders only authoritative values in a distinct fixed card", () => {
-  const product = extractAmazonProduct(sale, affiliate, saleUrl).product;
+test("Amazon card renders authoritative current, LIST_PRICE, and validated Amazon savings", () => {
+  const product = mapCreatorsItem(creatorsItem({ offersV2: { listings: [creatorsListing({ price: {
+    money: { amount: 24.99, currency: "USD", displayAmount: "$24.99" },
+    savingBasis: { money: { amount: 39.99, currency: "USD", displayAmount: "$39.99" }, savingBasisType: "LIST_PRICE" },
+    savings: { money: { amount: 15, currency: "USD", displayAmount: "$15.00" }, percentage: 38 }
+  } })] } }), "B08HNBHSQV", affiliate, saleUrl);
   const html = amazonCardHtml(product, { shortTitle: "ESR Magnetic Car Charger", facebookPost: "unused" }, "data:image/jpeg;base64,/9j/");
   assert.match(html, /Amazon Deal/);
   assert.match(html, /\$24\.99/);
-  assert.match(html, /\$39\.99/);
+  assert.match(html, /List price <\/span><span class="old-price">\$39\.99/);
+  assert.match(html, /38% off/);
   assert.match(html, /data-card-ready/);
   assert.ok(!html.includes(affiliate));
   assert.ok(!/https?:\/\//.test(html.replace(/http-equiv=/g, "")));
+});
+
+test("Amazon card renders current-only and never calculates missing savings", () => {
+  const currentOnly = mapCreatorsItem(creatorsItem(), "B08HNBHSQV", affiliate, saleUrl);
+  const currentHtml = amazonCardHtml(currentOnly, { shortTitle: "ESR Magnetic Car Charger", facebookPost: "unused" }, "data:image/jpeg;base64,/9j/");
+  assert.match(currentHtml, /\$24\.99/);
+  assert.doesNotMatch(currentHtml, /List price|% off/);
+
+  const listOnly = mapCreatorsItem(creatorsItem({ offersV2: { listings: [creatorsListing({ price: {
+    money: { amount: 24.99, currency: "USD", displayAmount: "$24.99" },
+    savingBasis: { money: { amount: 39.99, currency: "USD", displayAmount: "$39.99" }, savingBasisType: "LIST_PRICE" }
+  } })] } }), "B08HNBHSQV", affiliate, saleUrl);
+  const listHtml = amazonCardHtml(listOnly, { shortTitle: "ESR Magnetic Car Charger", facebookPost: "unused" }, "data:image/jpeg;base64,/9j/");
+  assert.match(listHtml, /List price <\/span><span class="old-price">\$39\.99/);
+  assert.doesNotMatch(listHtml, /% off/);
+});
+
+test("Amazon card omits rejected reference and inconsistent savings", () => {
+  const product = mapCreatorsItem(creatorsItem({ offersV2: { listings: [creatorsListing({ price: {
+    money: { amount: 24.99, currency: "USD", displayAmount: "$24.99" },
+    savingBasis: { money: { amount: 39.99, currency: "USD", displayAmount: "$39.99" }, savingBasisType: "WAS_PRICE" },
+    savings: { money: { amount: 14, currency: "USD", displayAmount: "$14.00" }, percentage: 20 }
+  } })] } }), "B08HNBHSQV", affiliate, saleUrl);
+  const html = amazonCardHtml(product, { shortTitle: "ESR Magnetic Car Charger", facebookPost: "unused" }, "data:image/jpeg;base64,/9j/");
+  assert.match(html, /\$24\.99/);
+  assert.doesNotMatch(html, /\$39\.99|List price|% off|\bwas\b/i);
 });
 
 test("Amazon cache identity includes ASIN, price, image and Amazon template version without affiliate URL", async () => {
@@ -490,11 +531,17 @@ test("Amazon Creators orchestration preserves exact affiliate URL, isolates AI, 
   const responses = [new Response("resolution only", { headers: { "content-type": "text/html" } }), new Response(image, { headers: { "content-type": "image/jpeg" } })];
   const result = await processProductLink(affiliate, {
     fetcher: async (url) => { seen.push(url); return responses.shift(); }, dnsCheck: async () => {},
-    copyProvider: { generate: async rawTitle => { assert.equal(rawTitle, "ESR HaloLock Magnetic Wireless Car Charger"); assert.ok(!rawTitle.includes(affiliate)); assert.ok(!rawTitle.includes("$24.99")); assert.ok(!rawTitle.includes("B08HNBHSQV")); return { shortTitle: "ESR Magnetic Car Charger" }; } },
-    renderer: { screenshot: async html => { renders++; assert.match(html, /Amazon Deal/); return { bytes: new Uint8Array([137,80,78,71,13,10,26,10]), mimeType: "image/png" }; } },
+    copyProvider: { generate: async (rawTitle, correctionReason) => {
+      assert.equal(rawTitle, "ESR HaloLock Magnetic Wireless Car Charger");
+      assert.equal(correctionReason, undefined);
+      for (const forbidden of [affiliate, "$24.99", "$39.99", "38", "B08HNBHSQV", "#Ad", "LIST_PRICE"]) assert.ok(!rawTitle.includes(forbidden));
+      return { shortTitle: "ESR Magnetic Car Charger" };
+    } },
+    renderer: { screenshot: async html => { renders++; assert.match(html, /Amazon Deal/); assert.match(html, /List price/); assert.match(html, /38% off/); return { bytes: new Uint8Array([137,80,78,71,13,10,26,10]), mimeType: "image/png" }; } },
     amazonProductProvider: creatorsProvider(creatorsItem({ offersV2: { listings: [creatorsListing({ price: {
       money: { amount: 24.99, currency: "USD", displayAmount: "$24.99" },
-      savingBasis: { money: { amount: 39.99, currency: "USD", displayAmount: "$39.99" }, savingBasisType: "LIST_PRICE" }
+      savingBasis: { money: { amount: 39.99, currency: "USD", displayAmount: "$39.99" }, savingBasisType: "LIST_PRICE" },
+      savings: { money: { amount: 15, currency: "USD", displayAmount: "$15.00" }, percentage: 38 }
     } })] } })),
     cardCache: { lookup: async () => { cacheCalls++; throw Error("must not read"); }, claim: async () => { cacheCalls++; return null; }, store: async () => { cacheCalls++; }, release: async () => { cacheCalls++; } },
     disclosure: "#Ad", requestId: "amazon-process"
