@@ -7,6 +7,9 @@ import { processProductLink } from "../orchestration/process-product-link";
 import { TelegramApi, TelegramApiError } from "./api";
 import { workerFetch } from "../network/worker-fetch";
 import { D1R2CardCache, cardCacheTtlSeconds } from "../cache/card-cache";
+import { AmazonCreatorsTokenManager, type CreatorsCredentialVersion } from "../stores/amazon/creators-token-manager";
+import { AmazonCreatorsApiClient } from "../stores/amazon/creators-api-client";
+import { CreatorsAmazonProductProvider, type AmazonProductProvider } from "../stores/amazon/creators-api-product";
 
 export type Env = {
   TELEGRAM_BOT_TOKEN: string;
@@ -19,9 +22,36 @@ export type Env = {
   CARD_CACHE_DB?: D1Database;
   CARD_CACHE_BUCKET?: R2Bucket;
   CARD_CACHE_TTL_SECONDS?: string;
+  AMAZON_CREATORS_CLIENT_ID?: string;
+  AMAZON_CREATORS_CLIENT_SECRET?: string;
+  AMAZON_CREATORS_CREDENTIAL_VERSION?: string;
+  AMAZON_CREATORS_MARKETPLACE?: string;
+  AMAZON_CREATORS_PARTNER_TAG?: string;
 };
 type TelegramUpdate = { message?: { text?: string; caption?: string; entities?: UrlEntity[]; caption_entities?: UrlEntity[]; chat?: { id?: number }; from?: { id?: number } } };
 export type TelegramJob = { chatId: number; telegramUserId?: number; inputUrl: string; requestId: string };
+
+let amazonRuntime: {
+  clientId: string;
+  clientSecret: string;
+  credentialVersion: CreatorsCredentialVersion;
+  marketplace: string;
+  partnerTag: string;
+  provider: AmazonProductProvider;
+} | undefined;
+
+function amazonProductProvider(env: Env): AmazonProductProvider | undefined {
+  const version = env.AMAZON_CREATORS_CREDENTIAL_VERSION;
+  if (!env.AMAZON_CREATORS_CLIENT_ID || !env.AMAZON_CREATORS_CLIENT_SECRET || !env.AMAZON_CREATORS_MARKETPLACE || !env.AMAZON_CREATORS_PARTNER_TAG || !["3.1", "3.2", "3.3"].includes(version ?? "")) return undefined;
+  const credentialVersion = version as CreatorsCredentialVersion;
+  if (amazonRuntime && amazonRuntime.clientId === env.AMAZON_CREATORS_CLIENT_ID && amazonRuntime.clientSecret === env.AMAZON_CREATORS_CLIENT_SECRET &&
+    amazonRuntime.credentialVersion === credentialVersion && amazonRuntime.marketplace === env.AMAZON_CREATORS_MARKETPLACE && amazonRuntime.partnerTag === env.AMAZON_CREATORS_PARTNER_TAG) return amazonRuntime.provider;
+  const tokens = new AmazonCreatorsTokenManager({ clientId: env.AMAZON_CREATORS_CLIENT_ID, clientSecret: env.AMAZON_CREATORS_CLIENT_SECRET, credentialVersion }, workerFetch);
+  const client = new AmazonCreatorsApiClient(tokens, { marketplace: env.AMAZON_CREATORS_MARKETPLACE, partnerTag: env.AMAZON_CREATORS_PARTNER_TAG }, workerFetch);
+  const provider = new CreatorsAmazonProductProvider(client);
+  amazonRuntime = { clientId: env.AMAZON_CREATORS_CLIENT_ID, clientSecret: env.AMAZON_CREATORS_CLIENT_SECRET, credentialVersion, marketplace: env.AMAZON_CREATORS_MARKETPLACE, partnerTag: env.AMAZON_CREATORS_PARTNER_TAG, provider };
+  return provider;
+}
 
 function secretMatches(actual: string | null, expected: string): boolean {
   if (!actual || actual.length !== expected.length) return false;
@@ -36,6 +66,7 @@ export function telegramErrorMessage(error: unknown): string {
   if (error.code === "DNS_CHECK_FAILED") return "I couldn't open that link. Please try another product link.";
   if (error.code === "UNSUPPORTED_STORE") return "That store isn't supported yet.";
   if (["FETCH_FAILED", "REDIRECT_LOOP", "TOO_MANY_REDIRECTS", "REDIRECT_MISSING_LOCATION"].includes(error.code)) return "I couldn't open that link. Please try another product link.";
+  if (error.code.startsWith("AMAZON_CREATORS_") || ["AMAZON_ITEM_NOT_FOUND", "AMAZON_ASIN_MISMATCH", "AMAZON_NO_PURCHASABLE_OFFER"].includes(error.code)) return "I couldn't retrieve a current Amazon offer for that product. Please try again later.";
   if (error.code === "MISSING_PRICE") return "I found the product, but couldn't reliably determine its current price.";
   if (error.stage === "ai") return "I found the product but couldn't generate the card text. Please try again.";
   if (error.stage === "render") return "I found the product but couldn't generate the image.";
@@ -106,6 +137,7 @@ export async function processTelegramJob(job: TelegramJob, env: Env): Promise<vo
       copyProvider: new WorkersAICopyProvider(env.AI, env.AI_TEXT_MODEL),
       renderer: new BrowserScreenshotRenderer(env.BROWSER),
       pageRenderer: new BrowserMobilePageRenderer(env.BROWSER),
+      amazonProductProvider: amazonProductProvider(env),
       disclosure: env.AFFILIATE_DISCLOSURE || "#Ad",
       requestId,
       telegramUserId,

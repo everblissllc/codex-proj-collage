@@ -1,5 +1,17 @@
 export type StoreId = "walmart" | "elf" | "amazon" | "target" | "homedepot";
 export type Price = { value: number; formatted: string; currency: string };
+export type AmazonProductMetadata = {
+  asin: string;
+  referencePriceType?: "LIST_PRICE";
+  savingBasisType?: string;
+  savings?: { money?: Price; percentage?: number };
+  dealDetails?: { accessType?: string; badge?: string; startTime?: string; endTime?: string };
+  availability: string;
+  condition: string;
+  listingType?: string;
+  isBuyBoxWinner?: boolean;
+  merchant?: { id?: string; name?: string };
+};
 export type ProductData = {
   store: StoreId;
   inputUrl: string;
@@ -10,6 +22,7 @@ export type ProductData = {
   imageUrl: string;
   currentPrice: Price;
   oldPrice?: Price;
+  amazon?: AmazonProductMetadata;
 };
 export type GeneratedContent = { shortTitle: string; facebookPost: string };
 export type CopyDraft = { shortTitle: string };

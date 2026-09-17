@@ -177,7 +177,7 @@ test("failed AI JSON content is rejected", () => {
 test("malformed Workers AI JSON response fails explicitly", async () => {
   const p = extractWalmartProduct(withWas, input, walmart);
   const provider = new WorkersAICopyProvider({ run: async () => ({ response: "not json" }) }, "test-model");
-  await assert.rejects(provider.generate(p), { code: "AI_BAD_JSON" });
+  await assert.rejects(provider.generate(p.rawTitle), { code: "AI_BAD_JSON" });
 });
 test("Workers AI provider makes one URL-free text inference and accepts fenced JSON", async () => {
   const p = extractWalmartProduct(withWas, input, walmart);
@@ -185,13 +185,14 @@ test("Workers AI provider makes one URL-free text inference and accepts fenced J
   const provider = new WorkersAICopyProvider({ run: async (model, options) => {
     calls++;
     assert.equal(model, "@cf/meta/llama-3.2-3b-instruct");
-    assert.ok(!JSON.stringify(options).includes(input));
+    assert.equal(options.messages[1].content, JSON.stringify({ rawTitle: p.rawTitle }));
+    assert.doesNotMatch(options.messages[1].content, /https?:\/\//i);
     assert.ok(!JSON.stringify(options).includes(p.currentPrice.formatted));
     assert.ok(!JSON.stringify(options).includes(p.oldPrice.formatted));
     assert.equal(options.messages.length, 2);
     return { response: '```json\n{"shortTitle":"Disney Toniebox Starter Set"}\n```' };
   } }, "@cf/meta/llama-3.2-3b-instruct");
-  const draft = await provider.generate(p);
+  const draft = await provider.generate(p.rawTitle);
   assert.equal(draft.shortTitle, "Disney Toniebox Starter Set");
   assert.equal(calls, 1);
   assert.throws(() => parseWorkersAIResponse({ response: { shortTitle: "Now $59" } }), { code: "AI_INVALID_CONTENT" });

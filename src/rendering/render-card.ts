@@ -4,6 +4,8 @@ import { resolveUrl } from "../stores/resolve-url";
 import type { CardImage, ScreenshotRenderer } from "./types";
 import { walmartCardHtml } from "../stores/walmart/template";
 import { walmartTheme } from "../stores/walmart/theme";
+import { amazonCardHtml } from "../stores/amazon/template";
+import { amazonTheme } from "../stores/amazon/theme";
 import { workerFetch, type FetchLike } from "../network/worker-fetch";
 
 type EmbeddedImage = { dataUrl: string; mimeType: string; byteLength: number };
@@ -52,9 +54,21 @@ export async function renderWalmartCard(product: ProductData, content: Generated
   return renderer.screenshot(html, walmartTheme.width, walmartTheme.height, requestId);
 }
 
+export async function renderAmazonCard(product: ProductData, content: GeneratedContent, renderer: ScreenshotRenderer, fetcher: FetchLike = workerFetch, dnsCheck: DnsCheck = assertPublicDns, requestId?: string): Promise<CardImage> {
+  const image = await fetchImageAsDataUrl(product.imageUrl, fetcher, dnsCheck, requestId);
+  const html = amazonCardHtml(product, content, image.dataUrl);
+  console.log(JSON.stringify({
+    event: "browser_render_started", requestId, width: amazonTheme.width, height: amazonTheme.height,
+    htmlLength: html.length, embeddedImageMimeType: image.mimeType, embeddedImageByteLength: image.byteLength
+  }));
+  return renderer.screenshot(html, amazonTheme.width, amazonTheme.height, requestId);
+}
+
 export async function renderCard(product: ProductData, content: GeneratedContent, renderer: ScreenshotRenderer, fetcher: FetchLike = workerFetch, dnsCheck: DnsCheck = assertPublicDns, requestId?: string): Promise<CardImage> {
-  if (product.store !== "walmart") throw new ProductError("UNSUPPORTED_STORE", "store", `No template for ${product.store}`);
-  try { return await renderWalmartCard(product, content, renderer, fetcher, dnsCheck, requestId); }
+  if (product.store !== "walmart" && product.store !== "amazon") throw new ProductError("UNSUPPORTED_STORE", "store", `No template for ${product.store}`);
+  try { return product.store === "walmart"
+    ? await renderWalmartCard(product, content, renderer, fetcher, dnsCheck, requestId)
+    : await renderAmazonCard(product, content, renderer, fetcher, dnsCheck, requestId); }
   catch (error) {
     if (error instanceof ProductError && error.stage === "render") throw error;
     throw new ProductError("RENDER_FAILED", "render", String(error));
