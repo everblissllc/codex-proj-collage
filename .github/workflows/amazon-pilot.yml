@@ -53,7 +53,7 @@ jobs:
           done
           test "$ready" = true
           pilot_status=$(curl --silent --show-error --max-time 180 --output /tmp/amazon-pilot-result.json --write-out '%{http_code}' \
-            "${{ steps.deploy.outputs.worker_url }}/")
+            "${{ steps.deploy.outputs.worker_url }}/health?run=1")
           PILOT_HTTP_STATUS="$pilot_status" node - <<'NODE'
           const fs = require("node:fs");
           let result;
