@@ -7,7 +7,7 @@ import { renderAmazonCard } from "../src/rendering/render-card";
 import { resolveUrl } from "../src/stores/resolve-url";
 import { validatePublicUrl } from "../src/stores/safe-url";
 import { amazonAsinFromUrl } from "../src/stores/amazon/diagnostics";
-import { AmazonCreatorsApiClient, amazonCreatorsGetItemsEndpoint } from "../src/stores/amazon/creators-api-client";
+import { AmazonCreatorsApiClient, AmazonCreatorsAuthError, amazonCreatorsGetItemsEndpoint } from "../src/stores/amazon/creators-api-client";
 import { mapCreatorsItem } from "../src/stores/amazon/creators-api-product";
 import type { CreatorsItem } from "../src/stores/amazon/creators-api-types";
 import { AmazonCreatorsTokenManager, creatorsTokenEndpoint, type CreatorsCredentialVersion } from "../src/stores/amazon/creators-token-manager";
@@ -207,6 +207,11 @@ async function runPilot(env: Env): Promise<Response> {
       });
     } catch (error) {
       result.rejectionReason = safeErrorCode(error);
+      if (error instanceof AmazonCreatorsAuthError) {
+        result.amazonApiHttpStatus = error.amazonDiagnostics.httpStatus;
+        result.amazonApiErrorType = error.amazonDiagnostics.amazonApiErrorType;
+        result.amazonApiErrorCode = error.amazonDiagnostics.amazonApiErrorCode;
+      }
       if (error instanceof ProductError && ["AMAZON_CREATORS_AUTH_FAILED", "AMAZON_CREATORS_RATE_LIMITED", "AMAZON_CREATORS_API_ERROR", "AMAZON_CREATORS_TIMEOUT"].includes(error.code)) {
         results.push(result);
         break;

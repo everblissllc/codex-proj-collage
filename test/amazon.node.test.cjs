@@ -9,7 +9,7 @@ const { extractAmazonProduct } = src("stores/amazon/extractor.js");
 const { amazonCardHtml } = src("stores/amazon/template.js");
 const { BrowserAmazonPageLoader } = src("stores/amazon/page-loader.js");
 const { AmazonCreatorsTokenManager, creatorsTokenEndpoint } = src("stores/amazon/creators-token-manager.js");
-const { AmazonCreatorsApiClient, amazonCreatorsGetItemsEndpoint, amazonCreatorsRetryBounds } = src("stores/amazon/creators-api-client.js");
+const { AmazonCreatorsApiClient, AmazonCreatorsAuthError, amazonCreatorsGetItemsEndpoint, amazonCreatorsRetryBounds } = src("stores/amazon/creators-api-client.js");
 const { mapCreatorsItem } = src("stores/amazon/creators-api-product.js");
 const { AMAZON_CREATORS_RESOURCES } = src("stores/amazon/creators-api-types.js");
 const { processProductLink } = src("orchestration/process-product-link.js");
@@ -239,6 +239,38 @@ test("Creators GetItems stops after two throttled attempts", async () => {
 test("Creators GetItems classifies API authorization failure", async () => {
   const client = new AmazonCreatorsApiClient({ getToken: async () => "token" }, { marketplace: "www.amazon.com", partnerTag: "tag-20" }, async () => Response.json({ type: "UnauthorizedException" }, { status: 401 }));
   await assert.rejects(client.getItem("B08HNBHSQV"), { code: "AMAZON_CREATORS_AUTH_FAILED" });
+});
+
+test("Creators GetItems retains only safe structured Amazon 403 diagnostics", async () => {
+  const logged = [];
+  const originalError = console.error;
+  console.error = value => logged.push(String(value));
+  try {
+    const client = new AmazonCreatorsApiClient(
+      { getToken: async () => "access-token-must-not-be-logged" },
+      { marketplace: "www.amazon.com", partnerTag: "tag-20" },
+      async () => Response.json({ errors: [{ type: "ForbiddenException", code: "AssociateNotEligible", message: "sensitive diagnostic text" }] }, { status: 403 })
+    );
+    await assert.rejects(client.getItem("B08HNBHSQV", "safe-request"), error => {
+      assert.equal(error instanceof AmazonCreatorsAuthError, true);
+      assert.equal(error.code, "AMAZON_CREATORS_AUTH_FAILED");
+      assert.deepEqual(error.amazonDiagnostics, {
+        httpStatus: 403,
+        amazonApiErrorType: "ForbiddenException",
+        amazonApiErrorCode: "AssociateNotEligible"
+      });
+      return true;
+    });
+  } finally {
+    console.error = originalError;
+  }
+  const output = logged.join("\n");
+  assert.match(output, /"requestId":"safe-request"/);
+  assert.match(output, /"asin":"B08HNBHSQV"/);
+  assert.match(output, /"httpStatus":403/);
+  assert.match(output, /"amazonApiErrorType":"ForbiddenException"/);
+  assert.match(output, /"amazonApiErrorCode":"AssociateNotEligible"/);
+  assert.doesNotMatch(output, /sensitive diagnostic text|access-token-must-not-be-logged|tag-20/);
 });
 
 test("Creators GetItems classifies an inaccessible item and exact-ASIN mismatch", async () => {

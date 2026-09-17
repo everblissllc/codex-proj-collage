@@ -5,6 +5,18 @@ import { AMAZON_CREATORS_RESOURCES, type CreatorsApiError, type CreatorsItem, ty
 import type { AmazonCreatorsTokenManager } from "./creators-token-manager";
 
 export type CreatorsApiConfig = { marketplace: string; partnerTag: string };
+export type AmazonCreatorsApiDiagnostics = {
+  httpStatus: 401 | 403;
+  amazonApiErrorType?: string;
+  amazonApiErrorCode?: string;
+};
+
+export class AmazonCreatorsAuthError extends ProductError {
+  constructor(public readonly amazonDiagnostics: AmazonCreatorsApiDiagnostics) {
+    super("AMAZON_CREATORS_AUTH_FAILED", "extraction", "Creators API authorization failed");
+  }
+}
+
 type Wait = (milliseconds: number) => Promise<void>;
 const GET_ITEMS_ENDPOINT = "https://creatorsapi.amazon/catalog/v1/getItems";
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -23,6 +35,10 @@ function retryDelay(response: Response, error: CreatorsApiError | undefined): nu
 async function safeJson(response: Response): Promise<GetItemsResponse & CreatorsApiError> {
   try { return await response.json() as GetItemsResponse & CreatorsApiError; }
   catch { return {}; }
+}
+
+function safeApiIdentifier(value: unknown): string | undefined {
+  return typeof value === "string" && value.length <= 120 && /^[A-Za-z0-9_.:-]+$/.test(value) ? value : undefined;
 }
 
 export class AmazonCreatorsApiClient {
@@ -74,8 +90,19 @@ export class AmazonCreatorsApiClient {
         throw new ProductError("AMAZON_CREATORS_RATE_LIMITED", "extraction", "Creators API throttled");
       }
       if (response.status === 401 || response.status === 403) {
-        console.error(JSON.stringify({ event: "amazon_creators_request_failed", requestId, asin, attempt, httpStatus: response.status, errorCategory: "auth", durationMs: Date.now() - started }));
-        throw new ProductError("AMAZON_CREATORS_AUTH_FAILED", "extraction", "Creators API authorization failed");
+        const amazonDiagnostics: AmazonCreatorsApiDiagnostics = {
+          httpStatus: response.status,
+          amazonApiErrorType: safeApiIdentifier(apiError?.type),
+          amazonApiErrorCode: safeApiIdentifier(apiError?.code)
+        };
+        console.error(JSON.stringify({
+          event: "amazon_creators_request_failed", requestId, asin, attempt,
+          httpStatus: amazonDiagnostics.httpStatus, errorCategory: "auth",
+          amazonApiErrorType: amazonDiagnostics.amazonApiErrorType,
+          amazonApiErrorCode: amazonDiagnostics.amazonApiErrorCode,
+          durationMs: Date.now() - started
+        }));
+        throw new AmazonCreatorsAuthError(amazonDiagnostics);
       }
       if (response.status === 404 || apiError?.type === "ResourceNotFoundException" || /ItemNotAccessible|ItemNotFound/i.test(apiError?.code ?? "")) {
         throw new ProductError("AMAZON_ITEM_NOT_FOUND", "extraction", "Amazon item not found");
