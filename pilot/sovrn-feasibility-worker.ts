@@ -34,18 +34,40 @@ function parseCandidates(value: string): Array<{ store: SovrnStoreId; url: strin
   });
 }
 
+function validateBootstrap(request: Request, env: Env): {
+  response?: Response;
+  candidates?: Array<{ store: SovrnStoreId; url: string }>;
+} {
+  if (!env.PILOT_RUN_SECRET) {
+    return { response: Response.json({ success: false, errorCode: "PILOT_BOOTSTRAP_NOT_READY", missingKeys: ["PILOT_RUN_SECRET"] }, { status: 503 }) };
+  }
+  if (!secureEqual(request.headers.get("x-pilot-secret"), env.PILOT_RUN_SECRET)) {
+    return { response: Response.json({ success: false, errorCode: "PILOT_UNAUTHORIZED" }, { status: 401 }) };
+  }
+  const missingKeys = configured(env);
+  if (missingKeys.length) {
+    return { response: Response.json({ success: false, errorCode: "PILOT_CONFIG_MISSING", missingKeys }, { status: 503 }) };
+  }
+  if (env.SOVRN_MARKET !== "usd_en") {
+    return { response: Response.json({ success: false, errorCode: "PILOT_MARKET_INVALID", invalidKey: "SOVRN_MARKET" }, { status: 400 }) };
+  }
+  try { return { candidates: parseCandidates(env.SOVRN_PILOT_PLAINLINKS_JSON!) }; }
+  catch {
+    return { response: Response.json({ success: false, errorCode: "PILOT_CANDIDATES_INVALID", invalidKey: "SOVRN_PILOT_PLAINLINKS_JSON" }, { status: 400 }) };
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") return Response.json({ ok: true });
-    if (request.method !== "POST" || url.pathname !== "/pilot") return new Response("Not found", { status: 404 });
-    if (!secureEqual(request.headers.get("x-pilot-secret"), env.PILOT_RUN_SECRET)) return Response.json({ success: false, errorCode: "PILOT_UNAUTHORIZED" }, { status: 401 });
-    const missingKeys = configured(env);
-    if (missingKeys.length) return Response.json({ success: false, errorCode: "PILOT_CONFIG_MISSING", missingKeys }, { status: 503 });
-    if (env.SOVRN_MARKET !== "usd_en") return Response.json({ success: false, errorCode: "PILOT_MARKET_INVALID", invalidKey: "SOVRN_MARKET" }, { status: 400 });
-    let candidates: Array<{ store: SovrnStoreId; url: string }>;
-    try { candidates = parseCandidates(env.SOVRN_PILOT_PLAINLINKS_JSON!); }
-    catch { return Response.json({ success: false, errorCode: "PILOT_CANDIDATES_INVALID", invalidKey: "SOVRN_PILOT_PLAINLINKS_JSON" }, { status: 400 }); }
+    const isReady = request.method === "GET" && url.pathname === "/ready";
+    const isPilot = request.method === "POST" && url.pathname === "/pilot";
+    if (!isReady && !isPilot) return new Response("Not found", { status: 404 });
+    const bootstrap = validateBootstrap(request, env);
+    if (bootstrap.response) return bootstrap.response;
+    if (isReady) return Response.json({ success: true, ready: true });
+    const candidates = bootstrap.candidates!;
     const client = new SovrnClient({
       secretKey: env.SOVRN_SECRET_KEY!, siteApiKey: env.SOVRN_SITE_API_KEY!, market: "usd_en", campaignId: env.SOVRN_CAMPAIGN_ID!
     });

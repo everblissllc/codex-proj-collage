@@ -70,15 +70,37 @@ jobs:
         run: |
           set -euo pipefail
           sleep 2
+          ready=false
+          attempts_used=0
+          for attempt in $(seq 1 10); do
+            attempts_used=$attempt
+            status=$(curl --silent --show-error --max-time 15 --request GET \
+              --header "x-pilot-secret: ${PILOT_RUN_SECRET}" \
+              "${{ steps.deploy.outputs.worker_url }}/ready" \
+              --output /tmp/sovrn-pilot-ready.json --write-out '%{http_code}')
+            set +e
+            node pilot/report-sovrn-bootstrap.mjs "$status" "$attempt" /tmp/sovrn-pilot-ready.json
+            bootstrap_result=$?
+            set -e
+            if [[ "$bootstrap_result" == "0" ]]; then
+              ready=true
+              break
+            fi
+            if [[ "$bootstrap_result" != "10" || "$attempt" == "10" ]]; then
+              exit 2
+            fi
+            sleep 2
+          done
+          if [[ "$ready" != "true" ]]; then
+            exit 2
+          fi
+          readiness_wait_seconds=$((2 + (attempts_used - 1) * 2))
+          echo "Sovrn pilot bootstrap ready after ${attempts_used} attempt(s) and ${readiness_wait_seconds}s bounded wait."
           status=$(curl --silent --show-error --max-time 180 --request POST \
             --header "x-pilot-secret: ${PILOT_RUN_SECRET}" \
             "${{ steps.deploy.outputs.worker_url }}/pilot" \
             --output /tmp/sovrn-pilot.json --write-out '%{http_code}')
-          if [[ "$status" != "200" && "$status" != "502" ]]; then
-            echo "Sovrn pilot returned unexpected HTTP $status." >&2
-            exit 2
-          fi
-          node pilot/report-sovrn-feasibility.mjs /tmp/sovrn-pilot.json
+          node pilot/report-sovrn-feasibility.mjs /tmp/sovrn-pilot.json "$status"
       - name: Delete isolated feasibility Worker
         if: always() && steps.deploy.outcome != 'skipped'
         shell: bash
