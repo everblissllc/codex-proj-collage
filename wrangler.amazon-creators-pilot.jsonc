@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "affiliate-deal-card-amazon-creators-pilot",
+  "main": "pilot/amazon-creators-pilot-worker.ts",
+  "compatibility_date": "2026-09-17",
+  "workers_dev": true,
+  "browser": { "binding": "BROWSER" },
+  "ai": { "binding": "AI" },
+  "vars": {
+    "AI_TEXT_MODEL": "@cf/meta/llama-3.2-3b-instruct",
+    "AFFILIATE_DISCLOSURE": "#Ad"
+  }
+}
