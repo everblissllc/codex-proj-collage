@@ -1,8 +1,0 @@
-{
-  "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "affiliate-deal-card-sovrn-feasibility",
-  "main": "pilot/sovrn-feasibility-worker.ts",
-  "compatibility_date": "2026-09-12",
-  "workers_dev": true,
-  "observability": { "enabled": true, "head_sampling_rate": 1 }
-}

@@ -10,25 +10,13 @@ jobs:
     runs-on: ubuntu-latest
     environment: sovrn-pilot
     env:
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       SOVRN_SECRET_KEY: ${{ secrets.SOVRN_SECRET_KEY }}
       SOVRN_SITE_API_KEY: ${{ secrets.SOVRN_SITE_API_KEY }}
       SOVRN_CAMPAIGN_ID: ${{ secrets.SOVRN_CAMPAIGN_ID }}
       SOVRN_MARKET: ${{ vars.SOVRN_MARKET }}
       SOVRN_PILOT_PLAINLINKS_JSON: ${{ vars.SOVRN_PILOT_PLAINLINKS_JSON }}
-      SOVRN_PILOT_BUILD_ID: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
-      - name: Select unique temporary Worker
-        id: target
-        shell: bash
-        run: |
-          set -euo pipefail
-          worker_name=$(node pilot/sovrn-worker-name.mjs "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT")
-          echo "WORKER_NAME=$worker_name" >> "$GITHUB_ENV"
-          echo "worker_name=$worker_name" >> "$GITHUB_OUTPUT"
-          echo "Temporary Worker: $worker_name"
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -39,101 +27,27 @@ jobs:
         run: |
           set -euo pipefail
           missing=()
-          for key in CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN SOVRN_SECRET_KEY SOVRN_SITE_API_KEY SOVRN_CAMPAIGN_ID SOVRN_MARKET SOVRN_PILOT_PLAINLINKS_JSON SOVRN_PILOT_BUILD_ID; do
+          for key in SOVRN_SECRET_KEY SOVRN_SITE_API_KEY SOVRN_CAMPAIGN_ID SOVRN_MARKET SOVRN_PILOT_PLAINLINKS_JSON; do
             if [[ -z "${!key:-}" ]]; then missing+=("$key"); fi
           done
           if (( ${#missing[@]} > 0 )); then
             printf 'Missing sovrn-pilot configuration key: %s\n' "${missing[@]}" >&2
             exit 2
           fi
-      - name: Validate source and pilot bundle
+      - name: Validate source and direct pilot
+        shell: bash
         run: |
+          set -euo pipefail
           npm run typecheck
           npm test
           git diff --check
           node scripts/check-smoke-config.mjs
-          npx tsc --noEmit -p tsconfig.sovrn-pilot.json
-          npx wrangler deploy --dry-run --name "$WORKER_NAME" --config wrangler.sovrn-pilot.jsonc
-      - name: Deploy isolated feasibility Worker
-        id: deploy
+          npx tsc --noEmit -p tsconfig.sovrn-direct-pilot.json
+      - name: Run direct sanitized Sovrn feasibility pilot
         shell: bash
         run: |
           set -euo pipefail
-          npx wrangler deploy --name "$WORKER_NAME" --config wrangler.sovrn-pilot.jsonc | tee /tmp/sovrn-pilot-deploy.log
-          worker_url=$(grep -Eo 'https://[^[:space:]]+\.workers\.dev' /tmp/sovrn-pilot-deploy.log | tail -1)
-          test -n "$worker_url"
-          echo "worker_url=$worker_url" >> "$GITHUB_OUTPUT"
-      - name: Provision isolated pilot bindings
-        shell: bash
-        run: |
-          set -euo pipefail
-          pilot_secret=$(openssl rand -hex 32)
-          echo "::add-mask::$pilot_secret"
-          export PILOT_RUN_SECRET="$pilot_secret"
-          node -e '
-            const keys = ["SOVRN_SECRET_KEY", "SOVRN_SITE_API_KEY", "SOVRN_CAMPAIGN_ID", "SOVRN_MARKET", "SOVRN_PILOT_PLAINLINKS_JSON", "SOVRN_PILOT_BUILD_ID", "PILOT_RUN_SECRET"];
-            process.stdout.write(JSON.stringify(Object.fromEntries(keys.map(key => [key, process.env[key]]))));
-          ' | npx wrangler secret bulk --name "$WORKER_NAME" --config wrangler.sovrn-pilot.jsonc
-          echo "PILOT_RUN_SECRET=$pilot_secret" >> "$GITHUB_ENV"
-      - name: Run sanitized Sovrn shape pilot
-        shell: bash
-        run: |
-          set -euo pipefail
-          sleep 2
-          ready=false
-          attempts_used=0
-          consecutive_successes=0
-          for attempt in $(seq 1 10); do
-            attempts_used=$attempt
-            status=$(curl --silent --show-error --max-time 15 --request GET \
-              --header "x-pilot-secret: ${PILOT_RUN_SECRET}" \
-              "${{ steps.deploy.outputs.worker_url }}/ready" \
-              --output /tmp/sovrn-pilot-ready.json --write-out '%{http_code}')
-            set +e
-            node pilot/report-sovrn-bootstrap.mjs "$status" "$attempt" /tmp/sovrn-pilot-ready.json "$SOVRN_PILOT_BUILD_ID" "$consecutive_successes"
-            bootstrap_result=$?
-            set -e
-            if [[ "$bootstrap_result" == "0" ]]; then
-              consecutive_successes=$((consecutive_successes + 1))
-              if [[ "$consecutive_successes" == "2" ]]; then
-                ready=true
-                break
-              fi
-            elif [[ "$bootstrap_result" == "10" ]]; then
-              consecutive_successes=0
-            else
-              exit 2
-            fi
-            if [[ "$attempt" == "10" ]]; then
-              exit 2
-            fi
-            sleep 2
-          done
-          if [[ "$ready" != "true" ]]; then
-            exit 2
-          fi
-          readiness_wait_seconds=$((2 + (attempts_used - 1) * 2))
-          echo "Sovrn pilot bootstrap reached two consecutive build-matched successes after ${attempts_used} attempt(s) and ${readiness_wait_seconds}s bounded wait."
-          status=$(curl --silent --show-error --max-time 180 --request POST \
-            --header "x-pilot-secret: ${PILOT_RUN_SECRET}" \
-            "${{ steps.deploy.outputs.worker_url }}/pilot" \
-            --dump-header /tmp/sovrn-pilot.headers \
-            --output /tmp/sovrn-pilot.json --write-out '%{http_code}')
-          node pilot/report-sovrn-feasibility.mjs /tmp/sovrn-pilot.json "$status" /tmp/sovrn-pilot.headers "$SOVRN_PILOT_BUILD_ID"
-      - name: Delete isolated feasibility Worker
-        if: always() && steps.deploy.outcome != 'skipped'
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ ! "${WORKER_NAME:-}" =~ ^affiliate-deal-card-sovrn-[0-9]+-[0-9]+$ ]]; then
-            echo "Refusing to delete an unexpected Worker name." >&2
-            exit 2
-          fi
-          status=$(curl --silent --show-error --output /tmp/sovrn-pilot-delete.json --write-out '%{http_code}' \
-            --request DELETE --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${WORKER_NAME}")
-          if [[ "$status" != "200" && "$status" != "404" ]]; then
-            echo "Temporary Sovrn pilot cleanup failed with HTTP $status." >&2
-            exit 1
-          fi
-          echo "Temporary Sovrn pilot Worker cleanup completed."
+          pilot_out="$RUNNER_TEMP/sovrn-direct-pilot"
+          mkdir -p "$pilot_out"
+          npx tsc -p tsconfig.sovrn-direct-pilot.json --noEmit false --outDir "$pilot_out"
+          node "$pilot_out/pilot/sovrn-direct-runner.js"

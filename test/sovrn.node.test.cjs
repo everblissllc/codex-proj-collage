@@ -1,17 +1,14 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { spawnSync } = require("node:child_process");
-const { mkdtempSync, readFileSync, writeFileSync } = require("node:fs");
-const { tmpdir } = require("node:os");
+const { readFileSync } = require("node:fs");
 const path = require("node:path");
 const root = process.env.COMPILED_ROOT;
 const req = relative => require(path.join(root, relative));
 
 const { ProductError } = req("types.js");
 const { SovrnClient } = req("stores/sovrn/client.js");
-const { classifySovrnReferencePrice, isSovrnOfferPotentiallyUsable, runSovrnPilotLookups } = req("stores/sovrn/feasibility.js");
+const { classifySovrnReferencePrice, isSovrnOfferPotentiallyUsable, parseSovrnPilotCandidates, runSovrnPilotLookups, summarizeSovrnPilotLookup } = req("stores/sovrn/feasibility.js");
 const { merchantMatchesStore, sovrnStoreForHostname } = req("stores/sovrn/merchant-registry.js");
-const { SOVRN_PILOT_BUILD_HEADER, withSovrnPilotBuildMarker } = req("stores/sovrn/pilot-response.js");
 const { buildSovrnPlainlink } = req("stores/sovrn/plainlink.js");
 const { mapSovrnProduct, buildSovrnFacebookPost } = req("stores/sovrn/product-mapper.js");
 const { describeSovrnPriceResponse, describeSovrnResponse, inspectApprovedMerchants } = req("stores/sovrn/response-shape.js");
@@ -30,46 +27,10 @@ const map = (offers, overrides = {}) => mapSovrnProduct({
   productIdentity: "12345678", offers, ...overrides
 });
 const expectCode = (fn, code) => assert.throws(fn, error => error instanceof ProductError && error.code === code);
-const runPilotReporter = (script, status, body, attempt, expectedBuildId = "build-123", consecutiveSuccesses = 0, headers = "") => {
-  const directory = mkdtempSync(path.join(tmpdir(), "sovrn-reporter-"));
-  const responsePath = path.join(directory, "response.txt");
-  const headersPath = path.join(directory, "headers.txt");
-  writeFileSync(responsePath, body);
-  writeFileSync(headersPath, headers);
-  const args = [path.join(process.cwd(), "pilot", script)];
-  if (attempt !== undefined) args.push(String(status), String(attempt), responsePath, expectedBuildId, String(consecutiveSuccesses));
-  else args.push(responsePath, String(status), headersPath, expectedBuildId);
-  return spawnSync(process.execPath, args, { encoding: "utf8" });
-};
-
-test("temporary Worker name is unique, valid, and bounded", () => {
-  const result = spawnSync(process.execPath, [path.join(process.cwd(), "pilot/sovrn-worker-name.mjs"), "35235137608", "2"], { encoding: "utf8" });
-  assert.equal(result.status, 0);
-  const name = result.stdout.trim();
-  assert.equal(name, "affiliate-deal-card-sovrn-35235137608-2");
-  assert.match(name, /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/);
-  assert.ok(name.length <= 63);
-  const invalid = spawnSync(process.execPath, [path.join(process.cwd(), "pilot/sovrn-worker-name.mjs"), "../../production", "1"], { encoding: "utf8" });
-  assert.equal(invalid.status, 2);
-  assert.doesNotMatch(invalid.stdout + invalid.stderr, /affiliate-deal-card-bot/);
-});
-
-test("workflow uses the same unique Worker for deploy, secret bulk, and guarded cleanup", () => {
+test("hosted feasibility workflow runs Node directly without Cloudflare Worker operations", () => {
   const workflow = readFileSync(path.join(process.cwd(), ".github/workflows/sovrn-feasibility-pilot.yml"), "utf8");
-  assert.match(workflow, /wrangler deploy --name "\$WORKER_NAME" --config wrangler\.sovrn-pilot\.jsonc/);
-  assert.match(workflow, /wrangler secret bulk --name "\$WORKER_NAME" --config wrangler\.sovrn-pilot\.jsonc/);
-  assert.match(workflow, /workers\/scripts\/\$\{WORKER_NAME\}/);
-  assert.match(workflow, /\^affiliate-deal-card-sovrn-\[0-9\]\+-\[0-9\]\+\$/);
-  const cleanup = workflow.slice(workflow.indexOf("- name: Delete isolated feasibility Worker"));
-  assert.doesNotMatch(cleanup, /affiliate-deal-card-bot|affiliate-deal-card-smoke|affiliate-deal-card-sovrn-feasibility/);
-});
-
-test("pilot responses carry a safe build marker that distinguishes platform responses", async () => {
-  const marked = withSovrnPilotBuildMarker(Response.json({ success: true }), "build-123");
-  assert.equal(marked.headers.get(SOVRN_PILOT_BUILD_HEADER), "build-123");
-  assert.equal((await marked.json()).success, true);
-  const external = new Response("Not found", { status: 404 });
-  assert.equal(external.headers.get(SOVRN_PILOT_BUILD_HEADER), null);
+  assert.match(workflow, /sovrn-direct-runner\.js/);
+  assert.doesNotMatch(workflow, /wrangler|workers\.dev|secret bulk|workers\/scripts|CLOUDFLARE_|curl|--request/i);
 });
 
 test("Sovrn candidate domains use exact/subdomain matching and reject lookalikes", () => {
@@ -197,6 +158,60 @@ test("Approved Merchants absence never blocks one sequential Price Comparison ca
   assert.ok(results.every(result => result.approvedMetadata === false && result.httpStatus === 200));
 });
 
+test("direct pilot input requires and orders all six configured retailers", () => {
+  const configured = {
+    bubble: "https://hellobubble.com/products/item",
+    target: "https://www.target.com/p/item/-/A-12345678",
+    sephora: "https://www.sephora.com/product/item-P12345",
+    nordstrom: "https://www.nordstrom.com/s/item/5151632",
+    ecosmetics: "https://www.ecosmetics.com/product/item",
+    ulta: "https://www.ulta.com/p/item-pimprod1234"
+  };
+  assert.deepEqual(parseSovrnPilotCandidates(JSON.stringify(configured)).map(candidate => candidate.store),
+    ["target", "nordstrom", "ulta", "sephora", "ecosmetics", "bubble"]);
+  assert.throws(() => parseSovrnPilotCandidates(JSON.stringify({ ...configured, bubble: undefined })));
+  assert.throws(() => parseSovrnPilotCandidates(JSON.stringify({ ...configured, other: "https://example.com" })));
+});
+
+test("direct pilot summary requires strong identity and never substitutes another merchant", () => {
+  const structure = describeSovrnPriceResponse([
+    {
+      merchant: { name: "Target", id: 390 }, name: "Exact Target Product", id: 10,
+      productId: "12345678", salePrice: 12.99, retailPrice: 19.99, currency: "USD",
+      discountRate: 35, affiliatable: true, deeplink: "https://secret.example/target",
+      image: "https://target.scene7.com/item.jpg"
+    },
+    {
+      merchant: { name: "Walmart", id: 1 }, name: "Cheaper Other Merchant", id: 11,
+      productId: "12345678", salePrice: 1, retailPrice: 20, currency: "USD",
+      discountRate: 95, affiliatable: true, image: "https://i5.walmartimages.com/item.jpg"
+    }
+  ]);
+  const summary = summarizeSovrnPilotLookup({
+    store: "target", httpStatus: 200, lookupIdentity: "12345678", structure
+  });
+  assert.equal(summary.sameRetailerMatch, true);
+  assert.equal(summary.identityConfidence, "confirmed");
+  assert.equal(summary.referencePriceClassification, "valid_reference_candidate");
+  assert.equal(summary.technicalUsability, true);
+  assert.equal(summary.sameRetailerOffer.salePrice, 12.99);
+  assert.equal(summary.sameRetailerOffer.merchant.name, "Target");
+  assert.equal(summary.sameRetailerOffer.deeplinkPresent, true);
+  assert.doesNotMatch(JSON.stringify(summary), /secret\.example/);
+
+  const ambiguous = summarizeSovrnPilotLookup({
+    store: "target", httpStatus: 200, lookupIdentity: "12345678",
+    structure: describeSovrnPriceResponse([{
+      merchant: { name: "Target", id: 390 }, name: "Unverified Variant", id: 12,
+      salePrice: 12.99, retailPrice: 12.99, currency: "USD", affiliatable: true,
+      image: "https://target.scene7.com/item.jpg"
+    }])
+  });
+  assert.equal(ambiguous.identityConfidence, "ambiguous");
+  assert.equal(ambiguous.referencePriceClassification, "equal_no_discount");
+  assert.equal(ambiguous.technicalUsability, false);
+});
+
 test("feasibility rejects non-affiliatable or identity-ambiguous offers and classifies references safely", () => {
   const valid = { sameRetailer: true, affiliatable: true, exactIdentityConfirmed: true, salePrice: 10, currency: "USD", imagePresent: true, imageHttps: true };
   assert.equal(isSovrnOfferPotentiallyUsable(valid), true);
@@ -300,100 +315,6 @@ test("price response discovery exposes exact safe offer fields but never deeplin
   assert.equal(summary.offers[0].strongerIdentityFields[0].value, "0012345678905");
   const serialized = JSON.stringify(summary);
   assert.doesNotMatch(serialized, /redirect\.viglink|secret=hidden|item\.jpg|thumb\.jpg/);
-});
-
-test("readiness reporter retries route propagation and approved 503 bootstrap states only", () => {
-  const route = runPilotReporter("report-sovrn-bootstrap.mjs", 404, "raw-secret-body", 1);
-  assert.equal(route.status, 10);
-  assert.deepEqual(JSON.parse(route.stdout), {
-    event: "sovrn_pilot_bootstrap", attempt: 1, httpStatus: 404, ready: false, errorCode: "PILOT_ROUTE_NOT_READY",
-    consecutiveSuccesses: 0, expectedBuildShort: "build-12"
-  });
-  const bootstrap = runPilotReporter("report-sovrn-bootstrap.mjs", 503,
-    '{"errorCode":"PILOT_BOOTSTRAP_NOT_READY","missingKeys":["PILOT_RUN_SECRET"]}', 2);
-  assert.equal(bootstrap.status, 10);
-  const expectedConfig = runPilotReporter("report-sovrn-bootstrap.mjs", 503,
-    '{"errorCode":"PILOT_CONFIG_MISSING","missingKeys":["SOVRN_PILOT_BUILD_ID"]}', 3);
-  assert.equal(expectedConfig.status, 10);
-  const unexpectedConfig = runPilotReporter("report-sovrn-bootstrap.mjs", 503,
-    '{"errorCode":"PILOT_CONFIG_MISSING","missingKeys":["UNAPPROVED_KEY"]}', 4);
-  assert.equal(unexpectedConfig.status, 2);
-  const unexpected = runPilotReporter("report-sovrn-bootstrap.mjs", 500, "raw-secret-body", 3);
-  assert.equal(unexpected.status, 2);
-  assert.equal(JSON.parse(unexpected.stdout).errorCode, "PILOT_HTTP_ERROR");
-  const output = route.stdout + route.stderr + bootstrap.stdout + bootstrap.stderr + expectedConfig.stdout + expectedConfig.stderr +
-    unexpectedConfig.stdout + unexpectedConfig.stderr + unexpected.stdout + unexpected.stderr;
-  assert.doesNotMatch(output, /raw-secret-body/);
-});
-
-test("readiness requires two consecutive matching build IDs and resets after retryable failure", () => {
-  const readyBody = '{"success":true,"ready":true,"buildId":"build-123"}';
-  const first = runPilotReporter("report-sovrn-bootstrap.mjs", 200, readyBody, 1, "build-123", 0);
-  assert.equal(first.status, 0);
-  assert.equal(JSON.parse(first.stdout).consecutiveSuccesses, 1);
-  const second = runPilotReporter("report-sovrn-bootstrap.mjs", 200, readyBody, 2, "build-123", 1);
-  assert.equal(second.status, 0);
-  assert.equal(JSON.parse(second.stdout).consecutiveSuccesses, 2);
-  const reset = runPilotReporter("report-sovrn-bootstrap.mjs", 404, "old route", 2, "build-123", 1);
-  assert.equal(reset.status, 10);
-  assert.equal(JSON.parse(reset.stdout).consecutiveSuccesses, 0);
-});
-
-test("readiness retries missing or wrong build IDs and fails unexpected errors", () => {
-  for (const body of [
-    '{"success":true,"ready":true}',
-    '{"success":true,"ready":true,"buildId":"wrong-build"}'
-  ]) {
-    const result = runPilotReporter("report-sovrn-bootstrap.mjs", 200, body, 1, "build-123", 0);
-    assert.equal(result.status, 10);
-    assert.equal(JSON.parse(result.stdout).errorCode, "PILOT_BUILD_NOT_READY");
-  }
-  const failure = runPilotReporter("report-sovrn-bootstrap.mjs", 401, '{"errorCode":"PILOT_UNAUTHORIZED"}', 1);
-  assert.equal(failure.status, 2);
-});
-
-test("final pilot reporter never retries or emits a raw HTTP 404 body", () => {
-  const result = runPilotReporter("report-sovrn-feasibility.mjs", 404, "raw-pilot-secret-body");
-  assert.equal(result.status, 2);
-  assert.equal(result.stderr, "");
-  assert.deepEqual(JSON.parse(result.stdout), {
-    event: "sovrn_pilot_failed", success: false, httpStatus: 404,
-    markerPresent: false, markerMatchesExpectedBuild: false, errorCode: "PILOT_RESPONSE_INVALID"
-  });
-  assert.doesNotMatch(result.stdout + result.stderr, /raw-pilot-secret-body/);
-});
-
-test("POST /pilot API failures are reported once and are never retried", () => {
-  const result = runPilotReporter("report-sovrn-feasibility.mjs", 500,
-    '{"success":false,"errorCode":"SOVRN_API_ERROR","missingKeys":["SOVRN_SECRET_KEY"]}');
-  assert.equal(result.status, 2);
-  assert.equal(result.stderr, "");
-  assert.deepEqual(JSON.parse(result.stdout), {
-    event: "sovrn_pilot_failed", success: false, httpStatus: 500,
-    markerPresent: false, markerMatchesExpectedBuild: false, errorCode: "SOVRN_API_ERROR",
-    missingKeys: ["SOVRN_SECRET_KEY"]
-  });
-  const workflow = readFileSync(path.join(process.cwd(), ".github/workflows/sovrn-feasibility-pilot.yml"), "utf8");
-  assert.equal((workflow.match(/--request POST/g) ?? []).length, 1);
-  assert.equal((workflow.match(/\/pilot"/g) ?? []).length, 1);
-});
-
-test("final reporter safely distinguishes marked application 404 from external 404", () => {
-  const application = runPilotReporter("report-sovrn-feasibility.mjs", 404, "not json", undefined,
-    "build-123", 0, "HTTP/2 404\r\nX-Sovrn-Pilot-Build: build-123\r\nContent-Type: text/plain; charset=UTF-8\r\nCF-Ray: abc123-ORD\r\n");
-  assert.equal(application.status, 2);
-  assert.deepEqual(JSON.parse(application.stdout), {
-    event: "sovrn_pilot_failed", success: false, httpStatus: 404,
-    markerPresent: true, markerMatchesExpectedBuild: true, contentType: "text/plain",
-    cloudflareRequestId: "abc123-ORD", errorCode: "PILOT_RESPONSE_INVALID"
-  });
-  const platform = runPilotReporter("report-sovrn-feasibility.mjs", 404, "not json", undefined,
-    "build-123", 0, "HTTP/2 404\r\nContent-Type: text/plain\r\n");
-  const safe = JSON.parse(platform.stdout);
-  assert.equal(safe.markerPresent, false);
-  assert.equal(safe.markerMatchesExpectedBuild, false);
-  assert.equal(safe.contentType, "text/plain");
-  assert.doesNotMatch(application.stdout + application.stderr + platform.stdout + platform.stderr, /not json|x-pilot-secret|deeplink/i);
 });
 
 test("approved merchant discovery uses presence in the official collection without exposing raw rows", () => {
