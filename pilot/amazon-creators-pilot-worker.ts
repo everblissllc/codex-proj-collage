@@ -18,12 +18,12 @@ type Env = {
   BROWSER: BrowserRun;
   AI_TEXT_MODEL: string;
   AFFILIATE_DISCLOSURE: string;
-  AMAZON_CREATORS_CLIENT_ID: string;
-  AMAZON_CREATORS_CLIENT_SECRET: string;
-  AMAZON_CREATORS_CREDENTIAL_VERSION: string;
-  AMAZON_CREATORS_MARKETPLACE: string;
-  AMAZON_CREATORS_PARTNER_TAG: string;
-  PILOT_RUN_SECRET: string;
+  AMAZON_CREATORS_CLIENT_ID?: string;
+  AMAZON_CREATORS_CLIENT_SECRET?: string;
+  AMAZON_CREATORS_CREDENTIAL_VERSION?: string;
+  AMAZON_CREATORS_MARKETPLACE?: string;
+  AMAZON_CREATORS_PARTNER_TAG?: string;
+  PILOT_RUN_SECRET?: string;
 };
 
 const PRODUCTS = ["B00MNV8E0C", "B09B2SBHQK", "B09B8V1LZ3", "B08HNBHSQV"] as const;
@@ -39,8 +39,8 @@ const REQUIRED_ENV = [
 type RequestObservation = { asin?: string; status: number; startedAt: number };
 type PilotCard = { filename: string; pngBase64: string };
 
-function secureEqual(actual: string | null, expected: string): boolean {
-  if (!actual || actual.length !== expected.length) return false;
+export function secureEqual(actual: string | null, expected: string | null | undefined): boolean {
+  if (!actual || !expected || actual.length !== expected.length) return false;
   let difference = 0;
   for (let index = 0; index < actual.length; index++) difference |= actual.charCodeAt(index) ^ expected.charCodeAt(index);
   return difference === 0;
@@ -104,7 +104,7 @@ function jsonResponse(value: unknown, status = 200): Response {
 async function runPilot(env: Env): Promise<Response> {
   const missing = REQUIRED_ENV.filter(key => !env[key]);
   if (missing.length) return jsonResponse({ success: false, errorCode: "PILOT_CONFIG_MISSING", missingKeys: missing }, 500);
-  if (!["3.1", "3.2", "3.3"].includes(env.AMAZON_CREATORS_CREDENTIAL_VERSION)) {
+  if (!["3.1", "3.2", "3.3"].includes(env.AMAZON_CREATORS_CREDENTIAL_VERSION!)) {
     return jsonResponse({ success: false, errorCode: "PILOT_CONFIG_INVALID", invalidKey: "AMAZON_CREATORS_CREDENTIAL_VERSION" }, 500);
   }
 
@@ -114,7 +114,7 @@ async function runPilot(env: Env): Promise<Response> {
   const observedFetch: FetchLike = async (input, init) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
     const response = await workerFetch(input, init);
-    if (url.href === creatorsTokenEndpoint(env.AMAZON_CREATORS_CREDENTIAL_VERSION as CreatorsCredentialVersion)) {
+    if (url.href === creatorsTokenEndpoint(env.AMAZON_CREATORS_CREDENTIAL_VERSION! as CreatorsCredentialVersion)) {
       let lifetimeSeconds: number | undefined;
       if (response.ok) {
         try {
@@ -130,13 +130,13 @@ async function runPilot(env: Env): Promise<Response> {
   };
 
   const tokenManager = new AmazonCreatorsTokenManager({
-    clientId: env.AMAZON_CREATORS_CLIENT_ID,
-    clientSecret: env.AMAZON_CREATORS_CLIENT_SECRET,
+    clientId: env.AMAZON_CREATORS_CLIENT_ID!,
+    clientSecret: env.AMAZON_CREATORS_CLIENT_SECRET!,
     credentialVersion: env.AMAZON_CREATORS_CREDENTIAL_VERSION as CreatorsCredentialVersion
   }, observedFetch);
   const client = new AmazonCreatorsApiClient(tokenManager, {
-    marketplace: env.AMAZON_CREATORS_MARKETPLACE,
-    partnerTag: env.AMAZON_CREATORS_PARTNER_TAG
+    marketplace: env.AMAZON_CREATORS_MARKETPLACE!,
+    partnerTag: env.AMAZON_CREATORS_PARTNER_TAG!
   }, observedFetch);
   const renderer = new BrowserScreenshotRenderer(env.BROWSER);
   const underlyingCopy = new WorkersAICopyProvider(env.AI, env.AI_TEXT_MODEL);
@@ -146,7 +146,7 @@ async function runPilot(env: Env): Promise<Response> {
   for (let index = 0; index < PRODUCTS.length; index++) {
     if (index > 0) await new Promise(resolve => setTimeout(resolve, 1100));
     const requestedAsin = PRODUCTS[index];
-    const originalUrl = `https://www.amazon.com/dp/${requestedAsin}?tag=${encodeURIComponent(env.AMAZON_CREATORS_PARTNER_TAG)}&ref_=creators_api_pilot`;
+    const originalUrl = `https://www.amazon.com/dp/${requestedAsin}?tag=${encodeURIComponent(env.AMAZON_CREATORS_PARTNER_TAG!)}&ref_=creators_api_pilot`;
     const requestId = `amazon-creators-pilot-${index + 1}`;
     const result: Record<string, unknown> = { requestedAsin, apiSuccess: false, offerAccepted: false };
     try {
@@ -249,7 +249,8 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === "/health") return jsonResponse({ ok: true });
     if (url.pathname !== "/pilot" || request.method !== "POST") return new Response("Not found", { status: 404 });
-    if (!secureEqual(request.headers.get("x-pilot-secret"), env.PILOT_RUN_SECRET)) return new Response("Unauthorized", { status: 401 });
+    if (!env.PILOT_RUN_SECRET) return jsonResponse({ success: false, errorCode: "PILOT_BOOTSTRAP_NOT_READY", missingKeys: ["PILOT_RUN_SECRET"] }, 503);
+    if (!secureEqual(request.headers.get("x-pilot-secret"), env.PILOT_RUN_SECRET)) return jsonResponse({ success: false, errorCode: "PILOT_UNAUTHORIZED" }, 401);
     return runPilot(env);
   }
 };

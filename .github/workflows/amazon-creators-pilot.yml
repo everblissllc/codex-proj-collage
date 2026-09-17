@@ -58,6 +58,7 @@ jobs:
         run: |
           set -euo pipefail
           pilot_secret=$(openssl rand -hex 32)
+          echo "::add-mask::$pilot_secret"
           printf '%s' "$AMAZON_CREATORS_CLIENT_ID" | npx wrangler secret put AMAZON_CREATORS_CLIENT_ID --config wrangler.amazon-creators-pilot.jsonc
           printf '%s' "$AMAZON_CREATORS_CLIENT_SECRET" | npx wrangler secret put AMAZON_CREATORS_CLIENT_SECRET --config wrangler.amazon-creators-pilot.jsonc
           printf '%s' "$AMAZON_CREATORS_CREDENTIAL_VERSION" | npx wrangler secret put AMAZON_CREATORS_CREDENTIAL_VERSION --config wrangler.amazon-creators-pilot.jsonc
@@ -70,16 +71,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          http_status=$(curl --silent --show-error --max-time 180 \
-            --request POST \
-            --header "x-pilot-secret: ${PILOT_RUN_SECRET}" \
-            "${{ steps.deploy.outputs.worker_url }}/pilot" \
-            --output /tmp/amazon-creators-pilot.json \
-            --write-out '%{http_code}')
-          if [[ "$http_status" != "200" && "$http_status" != "502" ]]; then
-            echo "Pilot Worker returned unexpected HTTP $http_status." >&2
-            exit 1
-          fi
+          sleep 1
+          for attempt in 1 2 3; do
+            http_status=$(curl --silent --show-error --max-time 180 \
+              --request POST \
+              --header "x-pilot-secret: ${PILOT_RUN_SECRET}" \
+              "${{ steps.deploy.outputs.worker_url }}/pilot" \
+              --output /tmp/amazon-creators-pilot.json \
+              --write-out '%{http_code}')
+            if [[ "$http_status" == "200" || "$http_status" == "502" ]]; then
+              break
+            fi
+            set +e
+            node pilot/report-amazon-creators-bootstrap.mjs /tmp/amazon-creators-pilot.json "$http_status"
+            diagnostic_status=$?
+            set -e
+            if [[ "$diagnostic_status" == "75" && "$attempt" -lt 3 ]]; then
+              echo "Pilot configuration is not ready; retrying bootstrap after 2 seconds."
+              sleep 2
+              continue
+            fi
+            exit "$diagnostic_status"
+          done
           node pilot/report-amazon-creators-pilot.mjs /tmp/amazon-creators-pilot.json /tmp/amazon-card-pilot
       - name: Upload Amazon card artifacts
         if: always()
