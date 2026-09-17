@@ -1,5 +1,5 @@
 import { pathToFileURL } from "node:url";
-import { AMAZON_CREATORS_RESOURCES, type CreatorsApiError, type CreatorsItem, type GetItemsResponse } from "../src/stores/amazon/creators-api-types";
+import { AMAZON_CREATORS_RESOURCES, type CreatorsApiError, type CreatorsItem, type GetItemsResponse } from "../src/stores/amazon/creators-api-types.js";
 
 const TOKEN_ENDPOINT = "https://api.amazon.com/auth/o2/token";
 const GET_ITEMS_ENDPOINT = "https://creatorsapi.amazon/catalog/v1/getItems";
