@@ -69,7 +69,7 @@ jobs:
               "AMAZON_CREATORS_PARTNER_TAG",
               "PILOT_RUN_SECRET"
             ];
-            process.stdout.write(JSON.stringify(Object.fromEntries(keys.map(key => [key, process.env[key]])));
+            process.stdout.write(JSON.stringify(Object.fromEntries(keys.map(key => [key, process.env[key]]))));
           ' | npx wrangler secret bulk --config wrangler.amazon-creators-pilot.jsonc
           echo "PILOT_RUN_SECRET=$pilot_secret" >> "$GITHUB_ENV"
       - name: Run sequential Creators API pilot
