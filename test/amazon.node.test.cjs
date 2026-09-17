@@ -296,29 +296,109 @@ test("Creators product maps current price with no reference", () => {
   const product = mapCreatorsItem(creatorsItem(), "B08HNBHSQV", affiliate, saleUrl);
   assert.equal(product.currentPrice.formatted, "$24.99");
   assert.equal(product.oldPrice, undefined);
+  assert.equal(product.amazon.savings, undefined);
   assert.equal(product.rawTitle, "ESR HaloLock Magnetic Wireless Car Charger");
   assert.equal(product.postUrl, affiliate);
 });
 
-test("Creators product maps WAS_PRICE and LIST_PRICE with deterministic wording", () => {
-  for (const [apiType, expectedType, phrase] of [["WAS_PRICE", "WAS_PRICE", "was"], ["LIST_PRICE", "LIST_PRICE", "list price"]]) {
-    const item = creatorsItem({ offersV2: { listings: [creatorsListing({ price: {
+test("Creators LIST_PRICE maps only when it is a positive higher same-currency reference", () => {
+  for (const [amount, expected] of [[39.99, "$39.99"], [24.99, undefined], [0, undefined], [20, undefined]]) {
+    const product = mapCreatorsItem(creatorsItem({ offersV2: { listings: [creatorsListing({ price: {
       money: { amount: 24.99, currency: "USD", displayAmount: "$24.99" },
-      savingBasis: { money: { amount: 39.99, currency: "USD", displayAmount: "$39.99" }, savingBasisType: apiType },
-      savings: { money: { amount: 15, currency: "USD", displayAmount: "$15.00" }, percentage: 38 }
-    } })] } });
-    const product = mapCreatorsItem(item, "B08HNBHSQV", affiliate, saleUrl);
-    assert.equal(product.oldPrice.formatted, "$39.99");
-    assert.equal(product.amazon.referencePriceType, expectedType);
-    assert.equal(product.amazon.savings.percentage, 38);
-    assert.equal(buildFacebookPost(product, "ESR Magnetic Car Charger", "#Ad"), `#Ad 🚨 ESR Magnetic Car Charger is now $24.99, ${phrase} $39.99.\n\n👉 ${affiliate}`);
+      savingBasis: { money: { amount, currency: "USD", displayAmount: `$${amount.toFixed(2)}` }, savingBasisType: "LIST_PRICE", savingBasisTypeLabel: "List Price" }
+    } })] } }), "B08HNBHSQV", affiliate, saleUrl);
+    assert.equal(product.oldPrice?.formatted, expected);
+    assert.equal(product.amazon.referencePriceType, expected ? "LIST_PRICE" : undefined);
+    assert.equal(product.amazon.savings, undefined);
   }
+});
+
+test("Creators current price rejects malformed money and missing currency", () => {
+  for (const money of [
+    { amount: Number.NaN, currency: "USD", displayAmount: "$24.99" },
+    { amount: 24.99, displayAmount: "$24.99" },
+    { amount: 24.99, currency: "US", displayAmount: "$24.99" },
+    { amount: 24.99, currency: "USD", displayAmount: "" }
+  ]) {
+    assert.throws(() => mapCreatorsItem(creatorsItem({ offersV2: { listings: [creatorsListing({ price: { money } })] } }), "B08HNBHSQV", affiliate, saleUrl), { code: "AMAZON_NO_PURCHASABLE_OFFER" });
+  }
+});
+
+test("Creators retains explicit savings fields and does not synthesize absent savings", () => {
+  const withSavings = mapCreatorsItem(creatorsItem({ offersV2: { listings: [creatorsListing({ price: {
+    money: { amount: 24.99, currency: "USD", displayAmount: "$24.99" },
+    savingBasis: { money: { amount: 39.99, currency: "USD", displayAmount: "$39.99" }, savingBasisType: "LIST_PRICE", savingBasisTypeLabel: "List Price" },
+    savings: { money: { amount: 15, currency: "USD", displayAmount: "$15.00" }, percentage: 38 }
+  } })] } }), "B08HNBHSQV", affiliate, saleUrl);
+  assert.deepEqual(withSavings.amazon.savings, {
+    money: { value: 15, formatted: "$15.00", currency: "USD" },
+    percentage: 38
+  });
+  const withoutSavings = mapCreatorsItem(creatorsItem(), "B08HNBHSQV", affiliate, saleUrl);
+  assert.equal(withoutSavings.amazon.savings, undefined);
+});
+
+test("Creators rejects inconsistent savings amount or percentage without dropping valid prices", () => {
+  for (const savings of [
+    { money: { amount: 14, currency: "USD", displayAmount: "$14.00" }, percentage: 38 },
+    { money: { amount: 15, currency: "USD", displayAmount: "$15.00" }, percentage: 20 },
+    { money: { amount: 15, currency: "CAD", displayAmount: "CA$15.00" }, percentage: 38 },
+    { money: { amount: 15, currency: "USD", displayAmount: "$15.00" } }
+  ]) {
+    const product = mapCreatorsItem(creatorsItem({ offersV2: { listings: [creatorsListing({ price: {
+      money: { amount: 24.99, currency: "USD", displayAmount: "$24.99" },
+      savingBasis: { money: { amount: 39.99, currency: "USD", displayAmount: "$39.99" }, savingBasisType: "LIST_PRICE" },
+      savings
+    } })] } }), "B08HNBHSQV", affiliate, saleUrl);
+    assert.equal(product.currentPrice.formatted, "$24.99");
+    assert.equal(product.oldPrice.formatted, "$39.99");
+    assert.equal(product.amazon.savings, undefined);
+  }
+});
+
+test("Creators never uses pricePerUnit as the current product price", () => {
+  const price = { pricePerUnit: { amount: 4.17, currency: "USD", displayAmount: "$4.17 / Count" } };
+  assert.throws(() => mapCreatorsItem(creatorsItem({ offersV2: { listings: [creatorsListing({ price })] } }), "B08HNBHSQV", affiliate, saleUrl), { code: "AMAZON_NO_PURCHASABLE_OFFER" });
+});
+
+test("Creators ignores coupon and promotion metadata when selecting current price", () => {
+  const listing = creatorsListing({
+    price: {
+      money: { amount: 24.99, currency: "USD", displayAmount: "$24.99" },
+      coupon: { percentage: 20, calculatedPrice: 19.99 },
+      promotion: { amount: 5, calculatedPrice: 19.99 }
+    }
+  });
+  const product = mapCreatorsItem(creatorsItem({ offersV2: { listings: [listing] } }), "B08HNBHSQV", affiliate, saleUrl);
+  assert.equal(product.currentPrice.formatted, "$24.99");
+  assert.equal(product.oldPrice, undefined);
+  assert.equal(product.amazon.savings, undefined);
+});
+
+test("Creators LIST_PRICE retains list-price semantics while WAS_PRICE is rejected", () => {
+  const price = {
+    money: { amount: 24.99, currency: "USD", displayAmount: "$24.99" },
+    savingBasis: { money: { amount: 39.99, currency: "USD", displayAmount: "$39.99" }, savingBasisType: "LIST_PRICE" },
+    savings: { money: { amount: 15, currency: "USD", displayAmount: "$15.00" }, percentage: 38 }
+  };
+  const listPrice = mapCreatorsItem(creatorsItem({ offersV2: { listings: [creatorsListing({ price })] } }), "B08HNBHSQV", affiliate, saleUrl);
+  assert.equal(listPrice.oldPrice.formatted, "$39.99");
+  assert.equal(listPrice.amazon.referencePriceType, "LIST_PRICE");
+  assert.equal(listPrice.amazon.savings.percentage, 38);
+  assert.equal(buildFacebookPost(listPrice, "ESR Magnetic Car Charger", "#Ad"), `#Ad 🚨 ESR Magnetic Car Charger is now $24.99, list price $39.99.\n\n👉 ${affiliate}`);
+
+  const wasPrice = mapCreatorsItem(creatorsItem({ offersV2: { listings: [creatorsListing({ price: {
+    ...price, savingBasis: { ...price.savingBasis, savingBasisType: "WAS_PRICE" }
+  } })] } }), "B08HNBHSQV", affiliate, saleUrl);
+  assert.equal(wasPrice.oldPrice, undefined);
+  assert.equal(wasPrice.amazon.referencePriceType, undefined);
+  assert.equal(wasPrice.amazon.savings, undefined);
 });
 
 test("Creators reference price is omitted when not higher, currency differs, or semantics are unsupported", () => {
   for (const basis of [
-    { money: { amount: 20, currency: "USD", displayAmount: "$20.00" }, savingBasisType: "WAS_PRICE" },
-    { money: { amount: 39.99, currency: "CAD", displayAmount: "CA$39.99" }, savingBasisType: "WAS_PRICE" },
+    { money: { amount: 20, currency: "USD", displayAmount: "$20.00" }, savingBasisType: "LIST_PRICE" },
+    { money: { amount: 39.99, currency: "CAD", displayAmount: "CA$39.99" }, savingBasisType: "LIST_PRICE" },
     { money: { amount: 39.99, currency: "USD", displayAmount: "$39.99" }, savingBasisType: "LOWEST_PRICE" }
   ]) {
     const product = mapCreatorsItem(creatorsItem({ offersV2: { listings: [creatorsListing({ price: { money: { amount: 24.99, currency: "USD", displayAmount: "$24.99" }, savingBasis: basis } })] } }), "B08HNBHSQV", affiliate, saleUrl);
@@ -333,6 +413,15 @@ test("Creators offer selection excludes Subscribe & Save and selects normal feat
   const product = mapCreatorsItem(creatorsItem({ offersV2: { listings: [subscription, normal] } }), "B08HNBHSQV", affiliate, saleUrl);
   assert.equal(product.currentPrice.formatted, "$24.99");
   assert.throws(() => mapCreatorsItem(creatorsItem({ offersV2: { listings: [subscription] } }), "B08HNBHSQV", affiliate, saleUrl), { code: "AMAZON_NO_PURCHASABLE_OFFER" });
+});
+
+test("Creators preserves LIGHTNINGDEAL offer type without changing authoritative price", () => {
+  const product = mapCreatorsItem(creatorsItem({ offersV2: { listings: [creatorsListing({
+    type: "LIGHTNINGDEAL",
+    price: { money: { amount: 21.99, currency: "USD", displayAmount: "$21.99" } }
+  })] } }), "B08HNBHSQV", affiliate, saleUrl);
+  assert.equal(product.currentPrice.formatted, "$21.99");
+  assert.equal(product.amazon.listingType, "LIGHTNINGDEAL");
 });
 
 test("Creators offer selection rejects unavailable, unsupported condition, MAP, and unrelated non-Buy-Box offers", () => {
@@ -405,7 +494,7 @@ test("Amazon Creators orchestration preserves exact affiliate URL, isolates AI, 
     renderer: { screenshot: async html => { renders++; assert.match(html, /Amazon Deal/); return { bytes: new Uint8Array([137,80,78,71,13,10,26,10]), mimeType: "image/png" }; } },
     amazonProductProvider: creatorsProvider(creatorsItem({ offersV2: { listings: [creatorsListing({ price: {
       money: { amount: 24.99, currency: "USD", displayAmount: "$24.99" },
-      savingBasis: { money: { amount: 39.99, currency: "USD", displayAmount: "$39.99" }, savingBasisType: "WAS_PRICE" }
+      savingBasis: { money: { amount: 39.99, currency: "USD", displayAmount: "$39.99" }, savingBasisType: "LIST_PRICE" }
     } })] } })),
     cardCache: { lookup: async () => { cacheCalls++; throw Error("must not read"); }, claim: async () => { cacheCalls++; return null; }, store: async () => { cacheCalls++; }, release: async () => { cacheCalls++; } },
     disclosure: "#Ad", requestId: "amazon-process"
@@ -413,7 +502,7 @@ test("Amazon Creators orchestration preserves exact affiliate URL, isolates AI, 
   assert.equal(renders, 1);
   assert.equal(cacheCalls, 0);
   assert.equal(result.product.postUrl, affiliate);
-  assert.equal(result.content.facebookPost, `#Ad 🚨 ESR Magnetic Car Charger is now $24.99, was $39.99.\n\n👉 ${affiliate}`);
+  assert.equal(result.content.facebookPost, `#Ad 🚨 ESR Magnetic Car Charger is now $24.99, list price $39.99.\n\n👉 ${affiliate}`);
 });
 
 test("amzn.to resolves internally while final copy retains exact short link", async () => {

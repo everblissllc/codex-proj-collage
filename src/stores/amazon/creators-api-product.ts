@@ -14,6 +14,18 @@ function money(value: CreatorsMoney | undefined): Price | undefined {
   if (!formatted) return undefined;
   return { value: value.amount, formatted, currency: value.currency };
 }
+function validatedSavings(listing: CreatorsListing, currentPrice: Price, listPrice: Price | undefined): AmazonProductMetadata["savings"] {
+  if (!listPrice) return undefined;
+  const supplied = listing.price?.savings;
+  const suppliedMoney = money(supplied?.money);
+  const percentage = supplied?.percentage;
+  if (!suppliedMoney || suppliedMoney.currency !== currentPrice.currency ||
+      typeof percentage !== "number" || !Number.isInteger(percentage) || percentage <= 0 || percentage > 100) return undefined;
+  const expectedAmount = listPrice.value - currentPrice.value;
+  const expectedPercentage = (expectedAmount / listPrice.value) * 100;
+  if (Math.abs(suppliedMoney.value - expectedAmount) > 0.011 || Math.abs(percentage - expectedPercentage) > 0.51) return undefined;
+  return { money: suppliedMoney, percentage };
+}
 function listingSafe(listing: CreatorsListing): boolean {
   const availability = normalized(listing.availability?.type);
   const condition = normalized(listing.condition?.value);
@@ -60,16 +72,13 @@ export function mapCreatorsItem(item: CreatorsItem, requestedAsin: string, input
   const basis = money(listing.price?.savingBasis?.money);
   const basisTypeRaw = listing.price?.savingBasis?.savingBasisType;
   const basisType = normalized(basisTypeRaw);
-  const referencePriceType = basisType === "WASPRICE" ? "WAS_PRICE" : basisType === "LISTPRICE" ? "LIST_PRICE" : undefined;
-  const oldPrice = referencePriceType && basis && basis.currency === currentPrice.currency && basis.value > currentPrice.value ? basis : undefined;
-  const savingsMoney = money(listing.price?.savings?.money);
+  const oldPrice = basisType === "LISTPRICE" && basis && basis.currency === currentPrice.currency && basis.value > currentPrice.value ? basis : undefined;
+  const savings = validatedSavings(listing, currentPrice, oldPrice);
   const amazon: AmazonProductMetadata = {
     asin: requestedAsin,
-    referencePriceType: oldPrice ? referencePriceType : undefined,
-    savingBasisType: basisTypeRaw,
-    savings: savingsMoney || Number.isFinite(listing.price?.savings?.percentage)
-      ? { money: savingsMoney, percentage: listing.price?.savings?.percentage }
-      : undefined,
+    referencePriceType: oldPrice ? "LIST_PRICE" : undefined,
+    savingBasisType: oldPrice ? basisTypeRaw : undefined,
+    savings,
     dealDetails: listing.dealDetails ? {
       accessType: listing.dealDetails.accessType,
       badge: listing.dealDetails.badge,
