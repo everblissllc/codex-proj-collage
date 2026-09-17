@@ -2,6 +2,7 @@ import { SovrnApiError, SovrnClient } from "../src/stores/sovrn/client";
 import { runSovrnPilotLookups } from "../src/stores/sovrn/feasibility";
 import { inspectApprovedMerchants } from "../src/stores/sovrn/response-shape";
 import { sovrnMerchantAdapters } from "../src/stores/sovrn/merchant-registry";
+import { withSovrnPilotBuildMarker } from "../src/stores/sovrn/pilot-response";
 import type { SovrnStoreId } from "../src/stores/sovrn/types";
 
 type Env = {
@@ -60,14 +61,15 @@ function validateBootstrap(request: Request, env: Env): {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const respond = (response: Response): Response => withSovrnPilotBuildMarker(response, env.SOVRN_PILOT_BUILD_ID);
     const url = new URL(request.url);
-    if (request.method === "GET" && url.pathname === "/health") return Response.json({ ok: true });
+    if (request.method === "GET" && url.pathname === "/health") return respond(Response.json({ ok: true }));
     const isReady = request.method === "GET" && url.pathname === "/ready";
     const isPilot = request.method === "POST" && url.pathname === "/pilot";
-    if (!isReady && !isPilot) return new Response("Not found", { status: 404 });
+    if (!isReady && !isPilot) return respond(new Response("Not found", { status: 404 }));
     const bootstrap = validateBootstrap(request, env);
-    if (bootstrap.response) return bootstrap.response;
-    if (isReady) return Response.json({ success: true, ready: true, buildId: env.SOVRN_PILOT_BUILD_ID });
+    if (bootstrap.response) return respond(bootstrap.response);
+    if (isReady) return respond(Response.json({ success: true, ready: true, buildId: env.SOVRN_PILOT_BUILD_ID }));
     const candidates = bootstrap.candidates!;
     const client = new SovrnClient({
       secretKey: env.SOVRN_SECRET_KEY!, siteApiKey: env.SOVRN_SITE_API_KEY!, market: "usd_en", campaignId: env.SOVRN_CAMPAIGN_ID!
@@ -92,10 +94,10 @@ export default {
         candidates, merchantFindings,
         compare: input => client.compareByPlainlinkDetailed(input)
       });
-      return Response.json({ success: true, source: "sovrn-price-comparison", market: "usd_en", merchants, results });
+      return respond(Response.json({ success: true, source: "sovrn-price-comparison", market: "usd_en", merchants, results }));
     } catch (error) {
       const productError = error && typeof error === "object" && "code" in error ? error as { code?: unknown } : undefined;
-      return Response.json({ success: false, errorCode: typeof productError?.code === "string" ? productError.code : "SOVRN_PILOT_FAILED" }, { status: 502 });
+      return respond(Response.json({ success: false, errorCode: typeof productError?.code === "string" ? productError.code : "SOVRN_PILOT_FAILED" }, { status: 502 }));
     }
   }
 } satisfies ExportedHandler<Env>;

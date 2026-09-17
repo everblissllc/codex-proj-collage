@@ -20,6 +20,15 @@ jobs:
       SOVRN_PILOT_BUILD_ID: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
+      - name: Select unique temporary Worker
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+          worker_name=$(node pilot/sovrn-worker-name.mjs "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT")
+          echo "WORKER_NAME=$worker_name" >> "$GITHUB_ENV"
+          echo "worker_name=$worker_name" >> "$GITHUB_OUTPUT"
+          echo "Temporary Worker: $worker_name"
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -44,13 +53,13 @@ jobs:
           git diff --check
           node scripts/check-smoke-config.mjs
           npx tsc --noEmit -p tsconfig.sovrn-pilot.json
-          npx wrangler deploy --dry-run --config wrangler.sovrn-pilot.jsonc
+          npx wrangler deploy --dry-run --name "$WORKER_NAME" --config wrangler.sovrn-pilot.jsonc
       - name: Deploy isolated feasibility Worker
         id: deploy
         shell: bash
         run: |
           set -euo pipefail
-          npx wrangler deploy --config wrangler.sovrn-pilot.jsonc | tee /tmp/sovrn-pilot-deploy.log
+          npx wrangler deploy --name "$WORKER_NAME" --config wrangler.sovrn-pilot.jsonc | tee /tmp/sovrn-pilot-deploy.log
           worker_url=$(grep -Eo 'https://[^[:space:]]+\.workers\.dev' /tmp/sovrn-pilot-deploy.log | tail -1)
           test -n "$worker_url"
           echo "worker_url=$worker_url" >> "$GITHUB_OUTPUT"
@@ -64,7 +73,7 @@ jobs:
           node -e '
             const keys = ["SOVRN_SECRET_KEY", "SOVRN_SITE_API_KEY", "SOVRN_CAMPAIGN_ID", "SOVRN_MARKET", "SOVRN_PILOT_PLAINLINKS_JSON", "SOVRN_PILOT_BUILD_ID", "PILOT_RUN_SECRET"];
             process.stdout.write(JSON.stringify(Object.fromEntries(keys.map(key => [key, process.env[key]]))));
-          ' | npx wrangler secret bulk --config wrangler.sovrn-pilot.jsonc
+          ' | npx wrangler secret bulk --name "$WORKER_NAME" --config wrangler.sovrn-pilot.jsonc
           echo "PILOT_RUN_SECRET=$pilot_secret" >> "$GITHUB_ENV"
       - name: Run sanitized Sovrn shape pilot
         shell: bash
@@ -108,16 +117,21 @@ jobs:
           status=$(curl --silent --show-error --max-time 180 --request POST \
             --header "x-pilot-secret: ${PILOT_RUN_SECRET}" \
             "${{ steps.deploy.outputs.worker_url }}/pilot" \
+            --dump-header /tmp/sovrn-pilot.headers \
             --output /tmp/sovrn-pilot.json --write-out '%{http_code}')
-          node pilot/report-sovrn-feasibility.mjs /tmp/sovrn-pilot.json "$status"
+          node pilot/report-sovrn-feasibility.mjs /tmp/sovrn-pilot.json "$status" /tmp/sovrn-pilot.headers "$SOVRN_PILOT_BUILD_ID"
       - name: Delete isolated feasibility Worker
         if: always() && steps.deploy.outcome != 'skipped'
         shell: bash
         run: |
           set -euo pipefail
+          if [[ ! "${WORKER_NAME:-}" =~ ^affiliate-deal-card-sovrn-[0-9]+-[0-9]+$ ]]; then
+            echo "Refusing to delete an unexpected Worker name." >&2
+            exit 2
+          fi
           status=$(curl --silent --show-error --output /tmp/sovrn-pilot-delete.json --write-out '%{http_code}' \
             --request DELETE --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/affiliate-deal-card-sovrn-feasibility")
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${WORKER_NAME}")
           if [[ "$status" != "200" && "$status" != "404" ]]; then
             echo "Temporary Sovrn pilot cleanup failed with HTTP $status." >&2
             exit 1
