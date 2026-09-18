@@ -2,6 +2,7 @@ import { readLimitedTextWithSize, resolveUrl } from "../resolve-url";
 import { classifySovrnVariantMatch, type SovrnPilotCandidate, type SovrnPilotLookupResult, type SovrnVariantClassification, type SovrnVariantEvidence } from "./feasibility";
 import { hostnameMatches, merchantMatchesStore, sovrnMerchantAdapters } from "./merchant-registry";
 import { extractElfProduct } from "../screenshot/elf";
+import { extractWalmartProduct } from "../walmart/extractor";
 import type { SovrnStoreId } from "./types";
 
 export type SovrnSourceIdentityClassification =
@@ -191,16 +192,22 @@ function sourceVariantEvidence(
   const shade = variantQuery.shade ?? variantQuery.color ?? products.find(product => product.color)?.color;
   const sku = variation?.sku ?? variantQuery.sku ?? products.find(product => product.sku)?.sku;
   const variantId = variation?.variationId ?? variantQuery.variant ?? variantQuery.skuid;
-  const explicit = Boolean(size || shade || variantId);
+  const color = shade ?? products.find(product => product.color)?.color
+    ?? clean(html.match(/"color"\s*:\s*"([^"]+)"/i)?.[1]);
+  const mpn = products.find(product => product.mpn)?.mpn
+    ?? clean(html.match(/"(?:model|modelNumber|mpn)"\s*:\s*"([^"]+)"/i)?.[1]);
+  const explicit = Boolean(size || color || variantId || mpn);
   const variantSignals = /(?:shade|swatch|variation|variant-selector|product-options)/i.test(html);
   return {
     explicit,
     multiVariantFamily: !explicit && (store === "nordstrom" || variantSignals),
     size,
     shade,
+    ...(color ? { color } : {}),
     variantId,
     sku,
-    gtin: products.find(product => product.gtin)?.gtin
+    gtin: products.find(product => product.gtin)?.gtin,
+    ...(mpn ? { mpn } : {})
   };
 }
 
@@ -248,6 +255,12 @@ export function assessSovrnPilotIdentity(
   const matchingShade = sourceEvidence.shade && offer.name && normalizedProductName(offer.name).includes(normalizedProductName(sourceEvidence.shade))
     ? sourceEvidence.shade
     : undefined;
+  const matchingColor = sourceEvidence.color && offer.name && normalizedProductName(offer.name).includes(normalizedProductName(sourceEvidence.color))
+    ? sourceEvidence.color
+    : undefined;
+  const matchingMpn = sourceEvidence.mpn && offer.name && normalizedProductName(offer.name).includes(normalizedProductName(sourceEvidence.mpn))
+    ? sourceEvidence.mpn
+    : undefined;
   const offerName = offer.name ? normalizedProductName(offer.name) : "";
   const sourceName = source.jsonLdProducts.map(product => product.name).filter((value): value is string => Boolean(value))
     .map(normalizedProductName).sort((left, right) => right.length - left.length).find(name => offerName.includes(name));
@@ -255,9 +268,11 @@ export function assessSovrnPilotIdentity(
     ? offerName.split(sourceName, 2)[1]?.replace(/\b\d+(?:\.\d+)?\s*(?:fl\s*)?oz\b|\b\d+(?:\.\d+)?\s*ml\b|\bin\s+jar\b/g, " ").trim()
     : undefined;
   const offerEvidence: SovrnVariantEvidence = {
-    explicit: Boolean(size || matchingShade || variantSuffix),
+    explicit: Boolean(size || matchingShade || matchingColor || matchingMpn || variantSuffix),
     size,
     shade: matchingShade ?? variantSuffix,
+    color: matchingColor,
+    mpn: matchingMpn,
     container: offer.name && /\bin\s+jar\b/i.test(offer.name) ? "jar" : undefined
   };
   return {
@@ -288,9 +303,11 @@ export function inspectSovrnSourceIdentity(input: {
   const variations = matchedWooVariations(input.html, variantQuery);
   let existingProduct: SovrnSourceIdentitySummary["existingProduct"];
   let existingProductError: string | undefined;
-  if (input.store === "elf") {
+  if (input.store === "elf" || input.store === "walmart") {
     try {
-      const product = extractElfProduct(input.html, input.sourceUrl, input.resolvedUrl);
+      const product = input.store === "elf"
+        ? extractElfProduct(input.html, input.sourceUrl, input.resolvedUrl)
+        : extractWalmartProduct(input.html, input.sourceUrl, input.resolvedUrl);
       let imageHostname: string | undefined;
       try { imageHostname = new URL(product.imageUrl).hostname; } catch { /* Extractor already validates this URL. */ }
       existingProduct = {

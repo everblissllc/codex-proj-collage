@@ -43,6 +43,7 @@ export type SovrnVariantEvidence = {
   sku?: string;
   upc?: string;
   gtin?: string;
+  mpn?: string;
 };
 
 export function classifySovrnReferencePrice(salePrice?: number, retailPrice?: number): SovrnReferenceClassification {
@@ -65,7 +66,7 @@ export function classifySovrnVariantMatch(
   offer: SovrnVariantEvidence
 ): SovrnVariantClassification {
   const comparable: Array<keyof Omit<SovrnVariantEvidence, "explicit" | "multiVariantFamily">> = [
-    "size", "shade", "color", "pack", "container", "variantId", "sku", "upc", "gtin"
+    "size", "shade", "color", "pack", "container", "variantId", "sku", "upc", "gtin", "mpn"
   ];
   let matchedEvidence = false;
   for (const key of comparable) {

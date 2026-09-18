@@ -41,11 +41,11 @@ jobs:
           git diff --check
           node scripts/check-smoke-config.mjs
           npx tsc --noEmit -p tsconfig.sovrn-direct-pilot.json
-      - name: Run direct sanitized Walmart and e.l.f. verification
+      - name: Run direct sanitized Walmart verification
         shell: bash
         run: |
           set -euo pipefail
           pilot_out="$RUNNER_TEMP/sovrn-direct-pilot"
           mkdir -p "$pilot_out"
           npx tsc -p tsconfig.sovrn-direct-pilot.json --noEmit false --outDir "$pilot_out"
-          node "$pilot_out/pilot/sovrn-walmart-elf-runner.js"
+          node "$pilot_out/pilot/sovrn-walmart-runner.js"
