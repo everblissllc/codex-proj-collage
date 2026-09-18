@@ -36,6 +36,19 @@ export type SovrnSourceIdentitySummary = {
   jsonLdProducts: SafeProductIdentity[];
   matchedVariations: Array<{ variationId?: string; sku?: string; attributes: Record<string, string> }>;
   variantEvidence?: SovrnVariantEvidence;
+  walmartSelectedVariant?: {
+    urlItemId?: string;
+    rootItemId?: string;
+    internalProductId?: string;
+    selectedItemId?: string;
+    selectedVariantIds: string[];
+    selectedMappedProductIds: string[];
+    model?: string;
+    color?: string;
+    sizeOrCapacity?: string;
+    pack?: string;
+    identityStatus: "CONFIRMED" | "CONFLICT" | "UNCONFIRMED";
+  };
   existingProduct?: {
     rawTitle: string;
     currentPrice: { value: number; formatted: string; currency: string };
@@ -71,6 +84,51 @@ function clean(value: unknown): string | undefined {
   if (typeof value !== "string" && typeof value !== "number") return undefined;
   const result = String(value).replace(/\s+/g, " ").trim();
   return result ? result.slice(0, 300) : undefined;
+}
+
+const record = (value: unknown): Record<string, unknown> | undefined =>
+  value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+
+function walmartSelectedVariant(html: string, urlItemId?: string): SovrnSourceIdentitySummary["walmartSelectedVariant"] {
+  const script = html.match(/<script\b[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i)?.[1];
+  if (!script) return { urlItemId, selectedVariantIds: [], selectedMappedProductIds: [], identityStatus: "UNCONFIRMED" };
+  let parsed: unknown;
+  try { parsed = JSON.parse(script); } catch {
+    return { urlItemId, selectedVariantIds: [], selectedMappedProductIds: [], identityStatus: "UNCONFIRMED" };
+  }
+  const pageProps = record(record(parsed)?.props)?.pageProps;
+  const page = record(pageProps);
+  const product = record(record(record(page?.initialData)?.data)?.product) ?? record(page?.product);
+  if (!product) return { urlItemId, selectedVariantIds: [], selectedMappedProductIds: [], identityStatus: "UNCONFIRMED" };
+  const rootItemId = clean(product.usItemId);
+  const displayVariantProductId = clean(product.displayVariantProductId);
+  const internalProductId = displayVariantProductId ?? clean(product.id);
+  const selectedVariantIds = Array.isArray(product.selectedVariantIds)
+    ? product.selectedVariantIds.map(clean).filter((value): value is string => Boolean(value))
+    : [];
+  const productIdMap = record(product.variantProductIdMap);
+  const selectedMappedProductIds = selectedVariantIds.map(id => clean(productIdMap?.[id])).filter((value): value is string => Boolean(value));
+  const selected = displayVariantProductId ? record(record(product.variantsMap)?.[displayVariantProductId]) : undefined;
+  const hasVariantState = Boolean(displayVariantProductId || selectedVariantIds.length);
+  const selectedItemId = clean(selected?.usItemId) ?? (!hasVariantState ? rootItemId : undefined);
+  const mappingsAgree = Boolean(displayVariantProductId && selectedVariantIds.length &&
+    selectedMappedProductIds.length === selectedVariantIds.length && selectedMappedProductIds.every(id => id === displayVariantProductId));
+  const identityStatus = !urlItemId || !rootItemId ? "UNCONFIRMED"
+    : urlItemId !== rootItemId ? "CONFLICT"
+      : hasVariantState
+        ? selectedItemId === urlItemId && mappingsAgree ? "CONFIRMED" : selectedItemId && selectedItemId !== urlItemId ? "CONFLICT" : "UNCONFIRMED"
+        : "CONFIRMED";
+  const selectedText = [clean(selected?.name), clean(product.name), ...selectedVariantIds].filter(Boolean).join(" ");
+  const color = clean(selected?.color ?? product.color) ?? selectedVariantIds
+    .map(id => id.match(/(?:actual_color|color)-(.+)$/i)?.[1]?.replace(/[-_]+/g, " "))
+    .find((value): value is string => Boolean(value));
+  const model = clean(selected?.model ?? product.model ?? selected?.modelNumber ?? product.modelNumber);
+  const sizeOrCapacity = selectedText.match(/\b(\d+(?:\.\d+)?\s*(?:fl\.?\s*oz\.?|oz\.?|g|kg|lb\.?|inch(?:es)?|in\.?|qt\.?|gal(?:lon)?s?))\b/i)?.[1];
+  const pack = selectedText.match(/\b(\d+\s*(?:pack|count|ct))\b/i)?.[1];
+  return {
+    urlItemId, rootItemId, internalProductId, selectedItemId, selectedVariantIds, selectedMappedProductIds,
+    model, color, sizeOrCapacity, pack, identityStatus
+  };
 }
 
 function productNodes(value: unknown, output: Record<string, unknown>[] = []): Record<string, unknown>[] {
@@ -178,7 +236,8 @@ function sourceVariantEvidence(
   html: string,
   variantQuery: Record<string, string>,
   products: readonly SafeProductIdentity[],
-  variations: SovrnSourceIdentitySummary["matchedVariations"]
+  variations: SovrnSourceIdentitySummary["matchedVariations"],
+  walmartVariant?: SovrnSourceIdentitySummary["walmartSelectedVariant"]
 ): SovrnVariantEvidence {
   const selectedTargetSize = [...html.matchAll(/<[^>]+aria-label\s*=\s*(?:"([^"]+)"|'([^']+)')[^>]*>/gi)]
     .map(match => decodeHtml(match[1] ?? match[2] ?? ""))
@@ -188,13 +247,13 @@ function sourceVariantEvidence(
     ?? html.match(/"product_size"\s*:\s*\[\s*"([^"]+)"/i)?.[1];
   const querySize = Object.entries(variantQuery).find(([key]) => /(?:^size$|attribute_pa_.*size)/i.test(key))?.[1];
   const variation = variations.length === 1 ? variations[0] : undefined;
-  const size = selectedTargetSize ?? structuredSize ?? (querySize ? sizeFromValue(querySize) : undefined) ?? products.find(product => product.size)?.size;
+  const size = walmartVariant?.sizeOrCapacity ?? selectedTargetSize ?? structuredSize ?? (querySize ? sizeFromValue(querySize) : undefined) ?? products.find(product => product.size)?.size;
   const shade = variantQuery.shade ?? variantQuery.color ?? products.find(product => product.color)?.color;
   const sku = variation?.sku ?? variantQuery.sku ?? products.find(product => product.sku)?.sku;
   const variantId = variation?.variationId ?? variantQuery.variant ?? variantQuery.skuid;
-  const color = shade ?? products.find(product => product.color)?.color
+  const color = walmartVariant?.color ?? shade ?? products.find(product => product.color)?.color
     ?? clean(html.match(/"color"\s*:\s*"([^"]+)"/i)?.[1]);
-  const mpn = products.find(product => product.mpn)?.mpn
+  const mpn = walmartVariant?.model ?? products.find(product => product.mpn)?.mpn
     ?? clean(html.match(/"(?:model|modelNumber|mpn)"\s*:\s*"([^"]+)"/i)?.[1]);
   const explicit = Boolean(size || color || variantId || mpn);
   const variantSignals = /(?:shade|swatch|variation|variant-selector|product-options)/i.test(html);
@@ -206,6 +265,7 @@ function sourceVariantEvidence(
     ...(color ? { color } : {}),
     variantId,
     sku,
+    ...(walmartVariant?.pack ? { pack: walmartVariant.pack } : {}),
     gtin: products.find(product => product.gtin)?.gtin,
     ...(mpn ? { mpn } : {})
   };
@@ -301,6 +361,7 @@ export function inspectSovrnSourceIdentity(input: {
   const variantQuery = selectedQuery(source, adapter.productSignificantParams);
   const products = jsonLdProducts(input.html);
   const variations = matchedWooVariations(input.html, variantQuery);
+  const walmartVariant = input.store === "walmart" ? walmartSelectedVariant(input.html, sourceProductId) : undefined;
   let existingProduct: SovrnSourceIdentitySummary["existingProduct"];
   let existingProductError: string | undefined;
   if (input.store === "elf" || input.store === "walmart") {
@@ -338,7 +399,8 @@ export function inspectSovrnSourceIdentity(input: {
     pageTitle: title(input.html),
     jsonLdProducts: products,
     matchedVariations: variations,
-    variantEvidence: sourceVariantEvidence(input.store, input.html, variantQuery, products, variations),
+    variantEvidence: sourceVariantEvidence(input.store, input.html, variantQuery, products, variations, walmartVariant),
+    walmartSelectedVariant: walmartVariant,
     existingProduct,
     existingProductError
   };

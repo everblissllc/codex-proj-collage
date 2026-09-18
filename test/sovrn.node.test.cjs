@@ -491,6 +491,58 @@ test("source identity inspection reports only canonical, JSON-LD, and matching e
   assert.doesNotMatch(JSON.stringify(summary), /secret\.example/);
 });
 
+test("Walmart feasibility evidence is bound to the URL-selected embedded variant", () => {
+  const selectedId = "54IS2LOFD40O";
+  const siblingId = "27GHL5QK1BUW";
+  const product = {
+    id: selectedId,
+    usItemId: "13162221820",
+    name: "Ninja Coffee Maker PB045 Black",
+    model: "PB045",
+    displayVariantProductId: selectedId,
+    selectedVariantIds: ["actual_color-black"],
+    variantProductIdMap: { "actual_color-black": selectedId, "actual_color-cyberspace": siblingId },
+    variantsMap: {
+      [selectedId]: {
+        id: selectedId, usItemId: "13162221820", variants: ["actual_color-black"],
+        priceInfo: { currentPrice: { price: 79.99 }, wasPrice: { price: 89 } },
+        imageInfo: { thumbnailUrl: "https://i5.walmartimages.com/black.jpeg" }
+      },
+      [siblingId]: {
+        id: siblingId, usItemId: "18533210828", variants: ["actual_color-cyberspace"],
+        priceInfo: { currentPrice: { price: 79 } },
+        imageInfo: { thumbnailUrl: "https://i5.walmartimages.com/cyberspace.jpeg" }
+      }
+    }
+  };
+  const html = `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { initialData: { data: { product } } } } })}</script>`;
+  const summary = inspectSovrnSourceIdentity({
+    store: "walmart",
+    sourceUrl: "https://www.walmart.com/ip/Ninja-Coffee-Machine-PB045/13162221820",
+    resolvedUrl: "https://www.walmart.com/ip/Ninja-Coffee-Machine-PB045/13162221820",
+    httpStatus: 200,
+    responseByteLength: html.length,
+    redirectCount: 0,
+    html
+  });
+  assert.deepEqual(summary.walmartSelectedVariant, {
+    urlItemId: "13162221820",
+    rootItemId: "13162221820",
+    internalProductId: selectedId,
+    selectedItemId: "13162221820",
+    selectedVariantIds: ["actual_color-black"],
+    selectedMappedProductIds: [selectedId],
+    model: "PB045",
+    color: "black",
+    sizeOrCapacity: undefined,
+    pack: undefined,
+    identityStatus: "CONFIRMED"
+  });
+  assert.equal(summary.existingProduct.currentPrice.value, 79.99);
+  assert.equal(summary.existingProduct.oldPrice.value, 89);
+  assert.equal(summary.existingProduct.imageHostname, "i5.walmartimages.com");
+});
+
 test("source inspection captures current Target and Ulta selected-size evidence", () => {
   const targetHtml = `<html><head><meta property="og:title" content="CeraVe Hydrating Face Wash"></head><body>
     <div data-product-id="81616326"><button aria-label="Size, 3 fl oz, selected">3 fl oz</button></div></body></html>`;

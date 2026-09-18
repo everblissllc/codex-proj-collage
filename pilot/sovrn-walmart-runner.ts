@@ -2,8 +2,13 @@ import { SovrnClient } from "../src/stores/sovrn/client";
 import { runSovrnPilotLookups, summarizeSovrnPilotLookup, type SovrnPilotCandidate } from "../src/stores/sovrn/feasibility";
 import { merchantMatchesStore } from "../src/stores/sovrn/merchant-registry";
 import { assessSovrnPilotIdentity, fetchSovrnSourceIdentities } from "../src/stores/sovrn/source-identity-feasibility";
+import { resolveUrl } from "../src/stores/resolve-url";
 
-const WALMART_CANDIDATE = "https://www.walmart.com/ip/Ninja-Coffee-Machine-PB045/13162221820";
+const WALMART_CANDIDATES = [
+  { label: "PRODUCT_1_SIMPLE", itemId: "19658170815", url: "https://www.walmart.com/ip/Ozark-Trail-Disposable-Instant-Charcoal-Grill-with-540g-Charcoal-Content/19658170815" },
+  { label: "PRODUCT_2_DISCOUNTED", itemId: "746021606", url: "https://www.walmart.com/ip/Expert-Grill-Heavy-Duty-24-inch-Charcoal-Grill-Black/746021606" },
+  { label: "PRODUCT_3_MULTI_VARIANT", itemId: "18317156543", url: "https://www.walmart.com/ip/Ninja-Blendboss-Tumbler-Blender-with-26oz-Travel-Tumbler-Cyberspace-DB351CY/18317156543" }
+] as const;
 const requiredKeys = ["SOVRN_SECRET_KEY", "SOVRN_SITE_API_KEY", "SOVRN_MARKET"] as const;
 type WireOffer = Record<string, unknown> & { merchant?: { name?: unknown; id?: unknown } };
 
@@ -38,75 +43,143 @@ async function readBoundedBytes(response: Response, maxBytes: number): Promise<U
 }
 
 function imageSignature(bytes: Uint8Array, mimeType: string): boolean {
-  if (mimeType === "image/png") return bytes.length >= 24 && [137, 80, 78, 71, 13, 10, 26, 10].every((value, index) => bytes[index] === value);
-  if (mimeType === "image/jpeg") return bytes.length >= 4 && bytes[0] === 255 && bytes[1] === 216 && bytes.at(-2) === 255 && bytes.at(-1) === 217;
-  return mimeType === "image/webp" && bytes.length >= 30 && String.fromCharCode(...bytes.subarray(0, 4)) === "RIFF" && String.fromCharCode(...bytes.subarray(8, 12)) === "WEBP";
+  if (mimeType === "image/png") return bytes.length >= 8 && [137, 80, 78, 71, 13, 10, 26, 10].every((value, index) => bytes[index] === value);
+  if (mimeType === "image/jpeg") return bytes.length >= 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
+  return mimeType === "image/webp" && bytes.length >= 12 && String.fromCharCode(...bytes.subarray(0, 4)) === "RIFF" && String.fromCharCode(...bytes.subarray(8, 12)) === "WEBP";
 }
 
 async function validateImage(value: unknown): Promise<Record<string, unknown>> {
   if (typeof value !== "string") return { valid: false, errorCode: "IMAGE_MISSING" };
   try {
-    const url = new URL(value);
-    if (url.protocol !== "https:") return { valid: false, https: false, errorCode: "IMAGE_NOT_HTTPS" };
-    const response = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(12_000), headers: { accept: "image/avif,image/webp,image/png,image/jpeg" } });
-    const mimeType = response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() ?? "";
-    if (!["image/png", "image/jpeg", "image/webp"].includes(mimeType)) return { valid: false, https: true, hostname: url.hostname, mimeType, errorCode: "IMAGE_TYPE_INVALID" };
-    const bytes = await readBoundedBytes(response, 6_000_000);
+    const page = await resolveUrl(value, undefined, "image/webp,image/png,image/jpeg");
+    const finalUrl = new URL(page.resolvedUrl);
+    const mimeType = page.response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() ?? "";
+    if (!["image/png", "image/jpeg", "image/webp"].includes(mimeType)) {
+      await page.response.body?.cancel();
+      return { valid: false, https: finalUrl.protocol === "https:", hostname: finalUrl.hostname, mimeType, errorCode: "IMAGE_TYPE_INVALID" };
+    }
+    const bytes = await readBoundedBytes(page.response, 6_000_000);
     const signatureValid = imageSignature(bytes, mimeType);
-    return { valid: signatureValid, https: true, hostname: url.hostname, mimeType, byteSize: bytes.byteLength, signatureValid };
+    return {
+      valid: signatureValid, https: finalUrl.protocol === "https:", hostname: finalUrl.hostname,
+      mimeType, byteSize: bytes.byteLength, signatureValid, redirectCount: page.redirectCount
+    };
   } catch (error) {
-    return { valid: false, errorCode: error instanceof Error ? error.message.slice(0, 80) : "IMAGE_VALIDATION_FAILED" };
+    return { valid: false, errorCode: error && typeof error === "object" && "code" in error ? String(error.code) : "IMAGE_VALIDATION_FAILED" };
   }
+}
+
+const cents = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isFinite(value) ? Math.round(value * 100) : undefined;
+function referenceValue(sale: unknown, retail: unknown): number | undefined {
+  return typeof sale === "number" && typeof retail === "number" && Number.isFinite(sale) && Number.isFinite(retail) && retail > sale && sale > 0
+    ? retail : undefined;
+}
+function referenceParity(walmart?: number, sovrn?: number): string {
+  if (walmart === undefined && sovrn === undefined) return "NEITHER";
+  if (walmart === undefined) return "SOVRN_ONLY";
+  if (sovrn === undefined) return "WALMART_ONLY";
+  return cents(walmart) === cents(sovrn) ? "EXACT" : "DIFFERENT";
 }
 
 async function main(): Promise<void> {
   const missingKeys = requiredKeys.filter(key => !process.env[key]);
   if (missingKeys.length) {
-    console.error(JSON.stringify({ event: "sovrn_walmart_failed", errorCode: "SOVRN_CONFIG_MISSING", missingKeys }));
+    console.error(JSON.stringify({ event: "sovrn_walmart_parity_failed", errorCode: "SOVRN_CONFIG_MISSING", missingKeys }));
     process.exitCode = 2;
     return;
   }
   if (process.env.SOVRN_MARKET !== "usd_en") {
-    console.error(JSON.stringify({ event: "sovrn_walmart_failed", errorCode: "SOVRN_MARKET_INVALID", invalidKey: "SOVRN_MARKET" }));
+    console.error(JSON.stringify({ event: "sovrn_walmart_parity_failed", errorCode: "SOVRN_MARKET_INVALID", invalidKey: "SOVRN_MARKET" }));
     process.exitCode = 2;
     return;
   }
 
-  const candidate: SovrnPilotCandidate = { store: "walmart", url: WALMART_CANDIDATE };
+  const candidates: SovrnPilotCandidate[] = WALMART_CANDIDATES.map(candidate => ({ store: "walmart", url: candidate.url }));
+  const sources = await fetchSovrnSourceIdentities(candidates);
   const client = new SovrnClient({ secretKey: process.env.SOVRN_SECRET_KEY!, siteApiKey: process.env.SOVRN_SITE_API_KEY!, market: "usd_en" });
-  const apiResponse = await client.compareByPlainlinkDetailed({ plainlink: WALMART_CANDIDATE, store: "walmart", requestId: "sovrn-walmart-pilot" });
-  const [lookup] = await runSovrnPilotLookups({ candidates: [candidate], merchantFindings: [], delay: async () => {}, compare: async () => apiResponse });
-  const [source] = await fetchSovrnSourceIdentities([candidate]);
-  const identityAssessment = assessSovrnPilotIdentity(lookup, source);
-  const result = summarizeSovrnPilotLookup(lookup, identityAssessment);
-  const sameRetailerWireOffers = responseOffers(apiResponse.value).filter(offer => merchantMatchesStore("walmart", { name: typeof offer.merchant?.name === "string" ? offer.merchant.name : undefined }));
-  const selectedWireOffer = sameRetailerWireOffers.length === 1 ? sameRetailerWireOffers[0] : undefined;
-  const imageValidation = await validateImage(selectedWireOffer?.image);
-  const technicalUsability = result.technicalUsability === true && imageValidation.valid === true;
-  const summaryOffer = result.sameRetailerOffer && typeof result.sameRetailerOffer === "object"
-    ? result.sameRetailerOffer as Record<string, unknown>
-    : undefined;
+  const results: Record<string, unknown>[] = [];
+
+  for (const [index, candidate] of WALMART_CANDIDATES.entries()) {
+    const apiResponse = await client.compareByPlainlinkDetailed({
+      plainlink: candidate.url, store: "walmart", requestId: `sovrn-walmart-parity-${index + 1}`
+    });
+    const [lookup] = await runSovrnPilotLookups({
+      candidates: [{ store: "walmart", url: candidate.url }], merchantFindings: [], delay: async () => {}, compare: async () => apiResponse
+    });
+    const source = sources[index];
+    const identityAssessment = assessSovrnPilotIdentity(lookup, source);
+    const summary = summarizeSovrnPilotLookup(lookup, identityAssessment);
+    const allWireOffers = responseOffers(apiResponse.value);
+    const sameRetailerWireOffers = allWireOffers.filter(offer => merchantMatchesStore("walmart", {
+      name: typeof offer.merchant?.name === "string" ? offer.merchant.name : undefined
+    }));
+    const selectedWireOffer = sameRetailerWireOffers.length === 1 ? sameRetailerWireOffers[0] : undefined;
+    const imageValidation = await validateImage(selectedWireOffer?.image);
+    const summaryOffer = summary.sameRetailerOffer && typeof summary.sameRetailerOffer === "object"
+      ? summary.sameRetailerOffer as Record<string, unknown> : undefined;
+    const walmartCurrent = source?.existingProduct?.currentPrice.value;
+    const walmartReference = source?.existingProduct?.oldPrice?.value;
+    const sovrnCurrent = summaryOffer?.salePrice;
+    const sovrnReference = referenceValue(summaryOffer?.salePrice, summaryOffer?.retailPrice);
+    const currentParity = walmartCurrent === undefined || typeof sovrnCurrent !== "number"
+      ? "UNAVAILABLE" : cents(walmartCurrent) === cents(sovrnCurrent) ? "EXACT" : "DIFFERENT";
+    const variantAccepted = ["EXACT_VARIANT_MATCH", "NO_VARIANT_CONFLICT"].includes(identityAssessment.variantClassification);
+    const imageParity = imageValidation.valid === true && variantAccepted ? "CONSISTENT_WITH_SELECTED_IDENTITY" : "UNCONFIRMED";
+    const usable = summary.technicalUsability === true && imageValidation.valid === true &&
+      source?.walmartSelectedVariant?.identityStatus === "CONFIRMED";
+    const merchant = summaryOffer && typeof summaryOffer.merchant === "object"
+      ? summaryOffer.merchant as Record<string, unknown> : undefined;
+    results.push({
+      label: candidate.label,
+      candidate: { hostname: "www.walmart.com", itemId: candidate.itemId, pathShape: "/ip/:slug/:itemId" },
+      sovrn: {
+        httpStatus: apiResponse.httpStatus, totalOffers: allWireOffers.length,
+        sameRetailerOfferCount: sameRetailerWireOffers.length,
+        allMerchantNames: allWireOffers.map(offer => typeof offer.merchant?.name === "string" ? offer.merchant.name : undefined).filter(Boolean),
+        merchantName: merchant?.name, merchantId: merchant?.id,
+        affiliatable: summaryOffer?.affiliatable, title: summaryOffer?.name,
+        salePrice: summaryOffer?.salePrice, retailPrice: summaryOffer?.retailPrice,
+        acceptedReferencePrice: sovrnReference, currency: summaryOffer?.currency,
+        imagePresent: Boolean((summaryOffer?.image as Record<string, unknown> | undefined)?.present),
+        thumbnailPresent: Boolean((summaryOffer?.thumbnail as Record<string, unknown> | undefined)?.present),
+        imageValidation
+      },
+      walmartSource: {
+        httpStatus: source?.httpStatus, sourceProductId: source?.sourceProductId,
+        canonicalItemId: source?.canonical?.pathname.match(/\/(\d+)(?:\/)?$/)?.[1],
+        selectedVariant: source?.walmartSelectedVariant,
+        title: source?.existingProduct?.rawTitle,
+        currentPrice: walmartCurrent, referencePrice: walmartReference,
+        imageHostname: source?.existingProduct?.imageHostname,
+        postUrlPreserved: source?.existingProduct?.postUrlPreserved,
+        extractionError: source?.existingProductError ?? source?.errorCode
+      },
+      identityAssessment,
+      priceParity: {
+        walmartCurrent, sovrnCurrent,
+        deltaCents: walmartCurrent !== undefined && typeof sovrnCurrent === "number" ? cents(sovrnCurrent)! - cents(walmartCurrent)! : undefined,
+        current: currentParity, walmartReference, sovrnReference,
+        reference: referenceParity(walmartReference, sovrnReference),
+        twoCentReferenceSpread: typeof sovrnCurrent === "number" && typeof sovrnReference === "number" &&
+          cents(sovrnReference)! - cents(sovrnCurrent)! === 2
+      },
+      imageParity, usable,
+      postUrlPreserved: source?.existingProduct?.postUrlPreserved === true,
+      sovrnDeeplinkUsedAsPostUrl: false
+    });
+    if (index < WALMART_CANDIDATES.length - 1) await new Promise(resolve => setTimeout(resolve, 250));
+  }
 
   console.log(JSON.stringify({
-    event: "sovrn_walmart_result", market: "usd_en",
-    candidate: { hostname: "www.walmart.com", itemId: "13162221820", pathShape: "/ip/:slug/:itemId" },
-    ...result, identityAssessment,
-    resultIdSemantics: "OPAQUE_SOVRN_METADATA", resultIdComparedToWalmartItemId: false,
-    sourceIdentity: source, existingWalmartExtractor: source?.existingProduct,
-    existingWalmartExtractorError: source?.existingProductError, imageValidation, technicalUsability,
-    normalizedProductData: technicalUsability && summaryOffer ? {
-      store: "walmart", rawTitle: summaryOffer.name,
-      currentPrice: { value: summaryOffer.salePrice, currency: summaryOffer.currency },
-      referencePrice: result.referencePriceClassification === "valid_reference_candidate"
-        ? { value: summaryOffer.retailPrice, currency: summaryOffer.currency } : undefined,
-      imagePresent: Boolean((summaryOffer.image as Record<string, unknown> | undefined)?.present),
-      postUrlPreserved: true, sovrnDeeplinkUsedAsPostUrl: false
-    } : undefined
+    event: "sovrn_walmart_parity_result", success: true, market: "usd_en",
+    candidateCount: WALMART_CANDIDATES.length, results
   }));
 }
 
 main().catch(error => {
-  const errorCode = error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "SOVRN_PILOT_FAILED";
-  console.error(JSON.stringify({ event: "sovrn_walmart_failed", errorCode }));
+  const errorCode = error && typeof error === "object" && "code" in error && typeof error.code === "string"
+    ? error.code : "SOVRN_PILOT_FAILED";
+  console.error(JSON.stringify({ event: "sovrn_walmart_parity_failed", errorCode }));
   process.exitCode = 2;
 });
