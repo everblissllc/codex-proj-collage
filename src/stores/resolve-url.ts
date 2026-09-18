@@ -1,12 +1,34 @@
 import { ProductError } from "../types";
 import { assertPublicDns, validatePublicUrl, type DnsCheck } from "./safe-url";
 import { workerFetch, type FetchLike } from "../network/worker-fetch";
+import { amazonAsinFromUrl } from "./amazon/diagnostics";
 
-export type ResolvedPage = { resolvedUrl: string; response: Response; redirectCount: number };
+declare const trustedAmazonRedirectIdentityBrand: unique symbol;
+export type TrustedAmazonRedirectIdentity = { readonly [trustedAmazonRedirectIdentityBrand]: true };
+const trustedAmazonRedirectAsinsByEvidence = new WeakMap<object, readonly string[]>();
+
+function createTrustedAmazonRedirectIdentity(asins: ReadonlySet<string>): TrustedAmazonRedirectIdentity | undefined {
+  if (asins.size === 0) return undefined;
+  const evidence = Object.freeze({}) as TrustedAmazonRedirectIdentity;
+  trustedAmazonRedirectAsinsByEvidence.set(evidence, Object.freeze([...asins]));
+  return evidence;
+}
+
+export function trustedAmazonRedirectAsins(evidence: TrustedAmazonRedirectIdentity | undefined): readonly string[] {
+  return evidence ? trustedAmazonRedirectAsinsByEvidence.get(evidence) ?? [] : [];
+}
+
+export type ResolvedPage = {
+  resolvedUrl: string;
+  response: Response;
+  redirectCount: number;
+  trustedAmazonRedirectIdentity?: TrustedAmazonRedirectIdentity;
+};
 
 export async function resolveUrl(inputUrl: string, fetcher: FetchLike = workerFetch, accept = "text/html,application/xhtml+xml", dnsCheck: DnsCheck = assertPublicDns): Promise<ResolvedPage> {
   let current = validatePublicUrl(inputUrl);
   const seen = new Set<string>();
+  const trustedAmazonAsins = new Set<string>();
   for (let hop = 0; hop <= 5; hop++) {
     if (seen.has(current.href)) throw new ProductError("REDIRECT_LOOP", "url", "Redirect loop");
     seen.add(current.href);
@@ -23,12 +45,20 @@ export async function resolveUrl(inputUrl: string, fetcher: FetchLike = workerFe
     if ([301, 302, 303, 307, 308].includes(response.status)) {
       const location = response.headers.get("location");
       if (!location) throw new ProductError("REDIRECT_MISSING_LOCATION", "url", "Redirect without Location");
-      current = validatePublicUrl(new URL(location, current).href);
+      const next = validatePublicUrl(new URL(location, current).href);
+      const amazonAsin = amazonAsinFromUrl(current.href);
+      if (amazonAsin) trustedAmazonAsins.add(amazonAsin);
+      current = next;
       await response.body?.cancel();
       continue;
     }
     // No automatic redirects: each destination is validated before it is fetched.
-    return { resolvedUrl: current.href, response, redirectCount: hop };
+    return {
+      resolvedUrl: current.href,
+      response,
+      redirectCount: hop,
+      trustedAmazonRedirectIdentity: createTrustedAmazonRedirectIdentity(trustedAmazonAsins)
+    };
   }
   throw new ProductError("TOO_MANY_REDIRECTS", "url", "Too many redirects");
 }

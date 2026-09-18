@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const { join } = require("node:path");
 const src = path => require(join(process.env.COMPILED_ROOT, path));
 const { detectStore } = src("stores/detect-store.js");
+const { resolveUrl, trustedAmazonRedirectAsins } = src("stores/resolve-url.js");
 const { amazonAsinFromUrl } = src("stores/amazon/diagnostics.js");
 const { resolveAmazonIdentity, trustedAmazonAsin } = src("stores/amazon/identity.js");
 const { amazonCardHtml } = src("stores/amazon/template.js");
@@ -41,6 +42,18 @@ function creatorsItem(overrides = {}) {
 
 function creatorsProvider(item = creatorsItem()) {
   return { product: async (asin, inputUrl, resolvedUrl) => mapCreatorsItem(item, asin, inputUrl, resolvedUrl) };
+}
+
+async function resolveChain(urls, finalHtml = "<html></html>") {
+  let index = 0;
+  return resolveUrl(urls[0], async url => {
+    assert.equal(url, urls[index]);
+    if (index < urls.length - 1) {
+      const location = urls[++index];
+      return new Response(null, { status: 302, headers: { location } });
+    }
+    return new Response(finalHtml, { headers: { "content-type": "text/html" } });
+  }, undefined, async () => {});
 }
 
 test("Amazon exact-domain detection rejects lookalikes", () => {
@@ -83,6 +96,67 @@ test("opaque trackers obtain Amazon identity only from the resolved destination 
   assert.equal(resolveAmazonIdentity(linkAmazon, "https://www.amazon.com/clp/opaque", '<link rel="canonical" href="https://www.amazon.com/dp/B08HNBHSQV">').asin, "B08HNBHSQV");
   assert.throws(() => resolveAmazonIdentity(linkAmazon, "https://www.amazon.com/clp/opaque", "<html></html>"), { code: "MISSING_PRODUCT_ID" });
   assert.throws(() => resolveAmazonIdentity(linkAmazon, "https://example.org/dp/B08HNBHSQV"), { code: "UNSAFE_AMAZON_URL" });
+});
+
+test("resolver retains normalized ASIN evidence from followed Amazon product-route redirects", async () => {
+  const tracker = "https://joylink.io/amazon/256-gb-flash-drive";
+  const asin = "B0D3PNRCMT";
+  const clp = "https://www.amazon.com/clp/opaque";
+
+  const dpPage = await resolveChain([tracker, `https://www.amazon.com/dp/${asin}/ref=tracker`, clp]);
+  assert.deepEqual(trustedAmazonRedirectAsins(dpPage.trustedAmazonRedirectIdentity), [asin]);
+  assert.deepEqual(resolveAmazonIdentity(tracker, dpPage.resolvedUrl, "<html></html>", dpPage.trustedAmazonRedirectIdentity), {
+    asin,
+    sourceIdentityState: "SOURCE_CONFIRMED",
+    sourceIdentityAsin: asin,
+    sourceIdentitySource: "intermediate-product-route"
+  });
+
+  const gpPage = await resolveChain([tracker, `https://www.amazon.com/gp/product/${asin}`, "https://www.amazon.com/hz/landing"]);
+  assert.equal(resolveAmazonIdentity(tracker, gpPage.resolvedUrl, "<html></html>", gpPage.trustedAmazonRedirectIdentity).asin, asin);
+
+  const repeatedPage = await resolveChain([
+    tracker,
+    `https://www.amazon.com/dp/${asin}`,
+    `https://www.amazon.com/gp/product/${asin}`,
+    clp
+  ]);
+  assert.deepEqual(trustedAmazonRedirectAsins(repeatedPage.trustedAmazonRedirectIdentity), [asin]);
+  assert.equal(resolveAmazonIdentity(tracker, repeatedPage.resolvedUrl, "<html></html>", repeatedPage.trustedAmazonRedirectIdentity).asin, asin);
+});
+
+test("Amazon identity rejects conflicts across intermediate, final, and page evidence", async () => {
+  const tracker = "https://tracker.example.com/click/amazon";
+  const intermediate = "https://www.amazon.com/dp/B0D3PNRCMT";
+  const conflictingFinal = "https://www.amazon.com/dp/B09Y98XQ63";
+  const finalConflictPage = await resolveChain([tracker, intermediate, conflictingFinal]);
+  assert.throws(
+    () => resolveAmazonIdentity(tracker, finalConflictPage.resolvedUrl, undefined, finalConflictPage.trustedAmazonRedirectIdentity),
+    { code: "AMAZON_ASIN_MISMATCH", validationReason: "SOURCE_CONFLICT" }
+  );
+
+  const clpPage = await resolveChain([tracker, intermediate, "https://www.amazon.com/clp/opaque"]);
+  assert.throws(
+    () => resolveAmazonIdentity(
+      tracker,
+      clpPage.resolvedUrl,
+      '<link rel="canonical" href="https://www.amazon.com/dp/B09Y98XQ63">',
+      clpPage.trustedAmazonRedirectIdentity
+    ),
+    { code: "AMAZON_ASIN_MISMATCH", validationReason: "SOURCE_CONFLICT" }
+  );
+});
+
+test("only resolver-originated supported Amazon redirect routes become trusted evidence", async () => {
+  const tracker = "https://joylink.io/amazon/B0D3PNRCMT-product-name";
+  const page = await resolveChain([
+    tracker,
+    "https://merchant.example.com/dp/B0D3PNRCMT",
+    "https://www.amazon.com/clp/opaque"
+  ]);
+  assert.deepEqual(trustedAmazonRedirectAsins(page.trustedAmazonRedirectIdentity), []);
+  assert.throws(() => resolveAmazonIdentity(tracker, page.resolvedUrl, "<html></html>", page.trustedAmazonRedirectIdentity), { code: "MISSING_PRODUCT_ID" });
+  assert.throws(() => resolveAmazonIdentity(tracker, page.resolvedUrl, "<html></html>", {}), { code: "MISSING_PRODUCT_ID" });
 });
 
 test("Creators token is obtained, cached, refreshed near expiry, and uses the official version endpoint", async () => {
@@ -496,6 +570,37 @@ test("Amazon short and multi-hop tracking links route by final destination and p
     assert.ok(!result.content.facebookPost.includes(current.input));
     assert.ok(result.content.facebookComment.endsWith(current.input));
   }
+});
+
+test("Amazon orchestration carries a followed intermediate ASIN through a final CLP route", async () => {
+  const tracker = "https://joylink.io/amazon/256-gb-flash-drive";
+  const asin = "B0D3PNRCMT";
+  const dp = `https://www.amazon.com/dp/${asin}/ref=tracker`;
+  const clp = "https://www.amazon.com/clp/opaque";
+  const image = new Uint8Array([255,216,255,217]);
+  let providerAsin;
+  const result = await processProductLink(tracker, {
+    fetcher: async url => {
+      if (url === tracker) return new Response(null, { status: 302, headers: { location: dp } });
+      if (url === dp) return new Response(null, { status: 301, headers: { location: clp } });
+      if (url === clp) return new Response("<html><title>Product</title></html>", { headers: { "content-type": "text/html" } });
+      if (url.startsWith("https://m.media-amazon.com/")) return new Response(image, { headers: { "content-type": "image/jpeg" } });
+      throw new Error(`Unexpected fetch host: ${new URL(url).hostname}`);
+    },
+    dnsCheck: async () => {},
+    copyProvider: { generate: async () => ({ shortTitle: "Portable Flash Drive" }) },
+    renderer: { screenshot: async () => ({ bytes: new Uint8Array([137,80,78,71,13,10,26,10]), mimeType: "image/png" }) },
+    amazonProductProvider: { product: async (requestedAsin, inputUrl, resolvedUrl) => {
+      providerAsin = requestedAsin;
+      return mapCreatorsItem(creatorsItem({ asin, itemInfo: { title: { displayValue: "Portable Flash Drive" } } }), requestedAsin, inputUrl, resolvedUrl);
+    } },
+    disclosure: "#Ad",
+    requestId: "amazon-intermediate-route"
+  });
+  assert.equal(providerAsin, asin);
+  assert.equal(result.product.resolvedUrl, clp);
+  assert.equal(result.product.postUrl, tracker);
+  assert.ok(result.content.facebookComment.endsWith(tracker));
 });
 
 test("Amazon CLP redirect retains original ASIN and exact postUrl through Creators verification", async () => {

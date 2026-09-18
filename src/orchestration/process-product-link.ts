@@ -143,7 +143,7 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
         try { identityHtml = (await readLimitedTextWithSize(page.response)).text; }
         catch { await page.response.body?.cancel(); }
       } else await page.response.body?.cancel();
-      const identity = resolveAmazonIdentity(inputUrl, page.resolvedUrl, identityHtml);
+      const identity = resolveAmazonIdentity(inputUrl, page.resolvedUrl, identityHtml, page.trustedAmazonRedirectIdentity);
       const asin = identity.asin;
       console.log(JSON.stringify({
         event: "amazon_source_identity", ...base, hostname, asin,

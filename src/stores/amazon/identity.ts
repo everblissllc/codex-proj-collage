@@ -1,5 +1,6 @@
 import { ProductError } from "../../types";
 import { validatePublicUrl } from "../safe-url";
+import { trustedAmazonRedirectAsins, type TrustedAmazonRedirectIdentity } from "../resolve-url";
 import { amazonAsinFromUrl, validAsin } from "./diagnostics";
 
 export type AmazonSourceIdentityState = "SOURCE_CONFIRMED" | "SOURCE_CONFLICT" | "SOURCE_UNCONFIRMED";
@@ -7,8 +8,10 @@ export type AmazonResolvedIdentity = {
   asin: string;
   sourceIdentityState: AmazonSourceIdentityState;
   sourceIdentityAsin?: string;
-  sourceIdentitySource?: "resolved-product-route" | "canonical" | "json-ld" | "add-to-cart";
+  sourceIdentitySource?: "intermediate-product-route" | "resolved-product-route" | "canonical" | "json-ld" | "add-to-cart";
 };
+type AmazonIdentitySource = NonNullable<AmazonResolvedIdentity["sourceIdentitySource"]>;
+type AmazonIdentityEvidence = { asin: string; source: AmazonIdentitySource };
 
 function allowedAmazonHost(hostname: string): boolean {
   const lower = hostname.toLowerCase();
@@ -76,14 +79,16 @@ function addToCartAsin(html: string): string | undefined {
   return candidates.size === 1 ? [...candidates][0] : undefined;
 }
 
-function sourceEvidence(html: string | undefined, resolvedUrl: string): Pick<AmazonResolvedIdentity, "sourceIdentityAsin" | "sourceIdentitySource"> {
-  if (!html) return {};
+function sourceEvidence(html: string | undefined, resolvedUrl: string): AmazonIdentityEvidence[] {
+  if (!html) return [];
+  const evidence: AmazonIdentityEvidence[] = [];
   const canonical = canonicalAsin(html, resolvedUrl);
-  if (canonical) return { sourceIdentityAsin: canonical, sourceIdentitySource: "canonical" };
+  if (canonical) evidence.push({ asin: canonical, source: "canonical" });
   const structured = jsonLdAsin(html);
-  if (structured) return { sourceIdentityAsin: structured, sourceIdentitySource: "json-ld" };
+  if (structured) evidence.push({ asin: structured, source: "json-ld" });
   const cart = addToCartAsin(html);
-  return cart ? { sourceIdentityAsin: cart, sourceIdentitySource: "add-to-cart" } : {};
+  if (cart) evidence.push({ asin: cart, source: "add-to-cart" });
+  return evidence;
 }
 
 export function trustedAmazonAsin(inputUrl: string): string {
@@ -92,23 +97,32 @@ export function trustedAmazonAsin(inputUrl: string): string {
   return asin;
 }
 
-export function resolveAmazonIdentity(inputUrl: string, resolvedUrl: string, html?: string): AmazonResolvedIdentity {
+export function resolveAmazonIdentity(
+  inputUrl: string,
+  resolvedUrl: string,
+  html?: string,
+  redirectIdentity?: TrustedAmazonRedirectIdentity
+): AmazonResolvedIdentity {
   const finalUrl = validatePublicUrl(resolvedUrl);
   if (!allowedAmazonHost(finalUrl.hostname)) throw new ProductError("UNSAFE_AMAZON_URL", "url", "Amazon redirect left the approved retailer domain");
 
   const submittedAsin = amazonAsinFromUrl(inputUrl);
   const resolvedAsin = amazonAsinFromUrl(finalUrl.href);
-  const evidence = resolvedAsin
-    ? { sourceIdentityAsin: resolvedAsin, sourceIdentitySource: "resolved-product-route" as const }
-    : sourceEvidence(html, finalUrl.href);
-  if (submittedAsin && evidence.sourceIdentityAsin && evidence.sourceIdentityAsin !== submittedAsin) {
+  const destinationEvidence: AmazonIdentityEvidence[] = [
+    ...(resolvedAsin ? [{ asin: resolvedAsin, source: "resolved-product-route" as const }] : []),
+    ...trustedAmazonRedirectAsins(redirectIdentity).map(asin => ({ asin, source: "intermediate-product-route" as const })),
+    ...sourceEvidence(html, finalUrl.href)
+  ];
+  const allAsins = new Set([...(submittedAsin ? [submittedAsin] : []), ...destinationEvidence.map(item => item.asin)]);
+  if (allAsins.size > 1) {
     throw new ProductError("AMAZON_ASIN_MISMATCH", "extraction", "Amazon redirect identifies another product", "SOURCE_CONFLICT");
   }
-  const asin = submittedAsin ?? evidence.sourceIdentityAsin;
+  const asin = allAsins.values().next().value as string | undefined;
   if (!asin) throw new ProductError("MISSING_PRODUCT_ID", "extraction", "Amazon destination does not contain a trusted ASIN");
+  const evidence = destinationEvidence[0];
   return {
     asin,
-    sourceIdentityState: evidence.sourceIdentityAsin ? "SOURCE_CONFIRMED" : "SOURCE_UNCONFIRMED",
-    ...evidence
+    sourceIdentityState: evidence ? "SOURCE_CONFIRMED" : "SOURCE_UNCONFIRMED",
+    ...(evidence ? { sourceIdentityAsin: evidence.asin, sourceIdentitySource: evidence.source } : {})
   };
 }
