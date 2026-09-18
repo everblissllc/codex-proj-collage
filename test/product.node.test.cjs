@@ -104,10 +104,104 @@ test("missing product image fails", () => {
   assert.throws(() => extractWalmartProduct(currentOnly.replace(/<meta property="og:image"[^>]+>/, ""), input, walmart), { code: "MISSING_IMAGE" });
 });
 test("embedded Walmart state fallback", () => {
-  const html = `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { product: { name: "Toniebox Elsa", imageUrl: "https://i5.walmartimages.com/seo/test.jpg", priceInfo: { currentPrice: { price: 59 }, wasPrice: { price: 99 } } } } } })}</script>`;
+  const html = `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { product: { usItemId: "123", name: "Toniebox Elsa", imageUrl: "https://i5.walmartimages.com/seo/test.jpg", priceInfo: { currentPrice: { price: 59 }, wasPrice: { price: 99 } } } } } })}</script>`;
   const p = extractWalmartProduct(html, input, walmart);
   assert.equal(p.rawTitle, "Toniebox Elsa");
   assert.equal(p.oldPrice.value, 99);
+});
+
+function walmartVariantFixture(overrides = {}) {
+  const blackId = "54IS2LOFD40O";
+  const cyberspaceId = "27GHL5QK1BUW";
+  const selected = {
+    id: blackId,
+    usItemId: "13162221820",
+    variants: ["actual_color-black"],
+    imageInfo: { thumbnailUrl: "https://i5.walmartimages.com/black.jpeg" },
+    priceInfo: {
+      currentPrice: { price: 79.99, priceString: "$79.99", currencyUnit: "USD" },
+      wasPrice: { price: 89, priceString: "$89.00", currencyUnit: "USD" },
+      listPrice: { price: 89, priceString: "$89.00", currencyUnit: "USD" }
+    },
+    ...(overrides.selected ?? {})
+  };
+  const sibling = {
+    id: cyberspaceId,
+    usItemId: "18533210828",
+    variants: ["actual_color-cyberspace"],
+    imageInfo: { thumbnailUrl: "https://i5.walmartimages.com/cyberspace.jpeg" },
+    priceInfo: { currentPrice: { price: 79, currencyUnit: "USD" }, wasPrice: { price: 89, currencyUnit: "USD" } },
+    ...(overrides.sibling ?? {})
+  };
+  const product = {
+    usItemId: "13162221820",
+    id: blackId,
+    name: "Ninja Pods & Grounds Hot & Iced Single-Serve Coffee Maker, PB045, Black",
+    model: "PB045",
+    canonicalUrl: "/ip/Ninja-Coffee-Machine-PB045/13162221820",
+    imageInfo: { thumbnailUrl: "https://i5.walmartimages.com/black.jpeg" },
+    priceInfo: selected.priceInfo,
+    displayVariantProductId: blackId,
+    selectedVariantIds: ["actual_color-black"],
+    variantProductIdMap: {
+      "actual_color-black": blackId,
+      "actual_color-cyberspace": cyberspaceId
+    },
+    variantsMap: { [cyberspaceId]: sibling, [blackId]: selected },
+    ...(overrides.product ?? {})
+  };
+  const jsonLd = overrides.jsonLd === false ? "" : `<script type="application/ld+json">${JSON.stringify({
+    "@type": "Product", name: "Ambiguous product family", image: "https://i5.walmartimages.com/family.jpeg",
+    offers: { price: 1, priceCurrency: "USD", wasPrice: 2 }
+  })}</script>`;
+  return `${jsonLd}<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { initialData: { data: { product } } } } })}</script>`;
+}
+
+const ninjaUrl = "https://www.walmart.com/ip/Ninja-Coffee-Machine-PB045/13162221820";
+
+test("Walmart PB045 Black resolves the selected internal variant and excludes the cheaper Cyberspace sibling", () => {
+  const p = extractWalmartProduct(walmartVariantFixture(), input, ninjaUrl);
+  assert.equal(p.rawTitle, "Ninja Pods & Grounds Hot & Iced Single-Serve Coffee Maker, PB045, Black");
+  assert.equal(p.currentPrice.value, 79.99);
+  assert.equal(p.oldPrice.value, 89);
+  assert.equal(p.imageUrl, "https://i5.walmartimages.com/black.jpeg");
+  assert.notEqual(p.currentPrice.value, 79);
+  assert.notEqual(p.imageUrl, "https://i5.walmartimages.com/cyberspace.jpeg");
+  assert.equal(p.postUrl, input);
+});
+
+test("Walmart selected variant mappings and URL item identity must agree", () => {
+  assert.throws(() => extractWalmartProduct(walmartVariantFixture({ product: { usItemId: "18533210828" } }), input, ninjaUrl), { code: "WALMART_VARIANT_MISMATCH" });
+  assert.throws(() => extractWalmartProduct(walmartVariantFixture({ product: { variantProductIdMap: { "actual_color-black": "27GHL5QK1BUW" } } }), input, ninjaUrl), { code: "WALMART_VARIANT_MISMATCH" });
+  assert.throws(() => extractWalmartProduct(walmartVariantFixture({ selected: { usItemId: "18533210828" } }), input, ninjaUrl), { code: "WALMART_VARIANT_MISMATCH" });
+});
+
+test("Walmart selected variant price is unaffected by lower or higher sibling prices", () => {
+  for (const siblingPrice of [1, 79, 999]) {
+    const html = walmartVariantFixture({ sibling: { priceInfo: { currentPrice: { price: siblingPrice, currencyUnit: "USD" } } } });
+    assert.equal(extractWalmartProduct(html, input, ninjaUrl).currentPrice.value, 79.99);
+  }
+});
+
+test("Walmart selected variant accepts wasPrice, then listPrice, only when higher", () => {
+  assert.equal(extractWalmartProduct(walmartVariantFixture(), input, ninjaUrl).oldPrice.value, 89);
+  const listOnly = walmartVariantFixture({ selected: { priceInfo: {
+    currentPrice: { price: 79.99, currencyUnit: "USD" }, listPrice: { price: 89, currencyUnit: "USD" }
+  } } });
+  assert.equal(extractWalmartProduct(listOnly, input, ninjaUrl).oldPrice.value, 89);
+  for (const reference of [79.99, 70, 0]) {
+    const html = walmartVariantFixture({ selected: { priceInfo: {
+      currentPrice: { price: 79.99, currencyUnit: "USD" }, wasPrice: { price: reference, currencyUnit: "USD" }
+    } } });
+    assert.equal(extractWalmartProduct(html, input, ninjaUrl).oldPrice, undefined);
+  }
+});
+
+test("ambiguous family JSON-LD cannot override validated Walmart selected variant price or image", () => {
+  const p = extractWalmartProduct(walmartVariantFixture(), input, ninjaUrl);
+  assert.equal(p.currentPrice.value, 79.99);
+  assert.equal(p.imageUrl, "https://i5.walmartimages.com/black.jpeg");
+  assert.notEqual(p.rawTitle, "Ambiguous product family");
 });
 test("normal Walmart fixtures expose only safe title-source diagnostics", () => {
   assert.deepEqual(inspectWalmartHtml(withWas, walmart), {

@@ -39,22 +39,77 @@ function offer(input: unknown): Record<string, unknown> | undefined {
   if (Array.isArray(input)) return offer(input[0]);
   return input && typeof input === "object" ? input as Record<string, unknown> : undefined;
 }
-function embeddedProduct(html: string): Record<string, unknown> | undefined {
+type EmbeddedSelection = {
+  root: Record<string, unknown>;
+  selected: Record<string, unknown>;
+  multiVariant: boolean;
+};
+
+function record(input: unknown): Record<string, unknown> | undefined {
+  return input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : undefined;
+}
+function walmartItemId(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname !== "walmart.com" && !parsed.hostname.endsWith(".walmart.com")) return undefined;
+    return parsed.pathname.match(/\/ip\/(?:[^/]+\/)?(\d+)(?:\/|$)/i)?.[1];
+  } catch { return undefined; }
+}
+function linkedWalmartItemId(input: unknown, baseUrl: string): string | undefined {
+  if (typeof input !== "string") return undefined;
+  try { return walmartItemId(new URL(input, baseUrl).href); }
+  catch { return undefined; }
+}
+function variantFailure(message: string): never {
+  throw new ProductError("WALMART_VARIANT_MISMATCH", "extraction", message);
+}
+function embeddedSelection(html: string, resolvedUrl: string): EmbeddedSelection | undefined {
   const script = html.match(/<script\b[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i)?.[1];
   if (!script) return undefined;
   let root: unknown;
   try { root = JSON.parse(script); } catch { return undefined; }
-  const stack: unknown[] = [root];
-  let visited = 0;
-  while (stack.length && visited++ < 50_000) {
-    const node = stack.pop();
-    if (!node || typeof node !== "object") continue;
-    if (Array.isArray(node)) { stack.push(...node); continue; }
-    const record = node as Record<string, unknown>;
-    if (typeof record.name === "string" && record.priceInfo && (record.imageInfo || record.imageUrl)) return record;
-    stack.push(...Object.values(record));
+  const parsed = record(root);
+  const props = record(parsed?.props);
+  const pageProps = record(props?.pageProps);
+  const initialData = record(pageProps?.initialData);
+  const data = record(initialData?.data);
+  const product = record(data?.product) ?? record(pageProps?.product);
+  if (!product) return undefined;
+  const itemId = walmartItemId(resolvedUrl);
+  if (!itemId) variantFailure("Walmart URL item identity is unavailable");
+  const rootItemId = str(product.usItemId);
+  if (rootItemId && rootItemId !== itemId) variantFailure("Walmart root product does not match the URL item");
+
+  const variantsMap = record(product.variantsMap);
+  const variantCount = variantsMap ? Object.keys(variantsMap).length : 0;
+  const selectedVariantIds = Array.isArray(product.selectedVariantIds)
+    ? product.selectedVariantIds.filter((value): value is string => typeof value === "string" && Boolean(value.trim()))
+    : [];
+  const displayVariantProductId = str(product.displayVariantProductId);
+  const variantProductIdMap = record(product.variantProductIdMap);
+  const multiVariant = variantCount > 1 || selectedVariantIds.length > 0 || Boolean(displayVariantProductId);
+
+  if (!multiVariant) {
+    if (!rootItemId) variantFailure("Walmart embedded product identity is unavailable");
+    return { root: product, selected: product, multiVariant: false };
   }
-  return undefined;
+
+  if (!rootItemId || !displayVariantProductId || !selectedVariantIds.length || !variantProductIdMap || !variantsMap) {
+    variantFailure("Walmart selected variant state is incomplete");
+  }
+  const mappedIds = selectedVariantIds.map(id => str(variantProductIdMap[id]));
+  if (mappedIds.some(id => !id) || mappedIds.some(id => id !== displayVariantProductId)) {
+    variantFailure("Walmart selected variant mapping conflicts with the displayed variant");
+  }
+  const selected = record(variantsMap[displayVariantProductId]);
+  if (!selected) variantFailure("Walmart selected variant record is unavailable");
+  if (str(selected.usItemId) !== itemId) variantFailure("Walmart selected variant does not match the URL item");
+  if (str(selected.id) && str(selected.id) !== displayVariantProductId) variantFailure("Walmart selected variant ID conflicts with the displayed variant");
+  const selectedAttributes = Array.isArray(selected.variants) ? selected.variants.filter(value => typeof value === "string") : [];
+  if (selectedAttributes.length && selectedVariantIds.some(id => !selectedAttributes.includes(id))) {
+    variantFailure("Walmart selected variant attributes conflict with the displayed variant");
+  }
+  return { root: product, selected, multiVariant: true };
 }
 function priceCandidate(input: unknown): unknown {
   if (input && typeof input === "object") {
@@ -66,26 +121,37 @@ function priceCandidate(input: unknown): unknown {
 
 export function extractWalmartProduct(html: string, inputUrl: string, resolvedUrl: string): ProductData {
   const products = jsonLdProducts(html);
-  const product = products.find(p => p.name && p.image) ?? products[0];
+  const itemId = walmartItemId(resolvedUrl);
+  const identifiedProduct = products.find(product => linkedWalmartItemId(product.url, resolvedUrl) === itemId);
+  const selection = embeddedSelection(html, resolvedUrl);
+  const product = identifiedProduct ?? (!selection?.multiVariant && products.length === 1 ? products[0] : undefined);
   const offers = offer(product?.offers);
-  const embedded = embeddedProduct(html);
-  const priceInfo = offer(embedded?.priceInfo);
-  const imageInfo = offer(embedded?.imageInfo);
-  const rawTitle = str(product?.name) ?? str(embedded?.name) ?? meta(html, "og:title");
-  const rawImage = image(product?.image) ?? image(imageInfo?.allImages ?? imageInfo?.thumbnailUrl) ?? image(embedded?.imageUrl) ?? meta(html, "og:image");
+  const selectedPriceInfo = offer(selection?.selected.priceInfo);
+  const rootPriceInfo = offer(selection?.root.priceInfo);
+  const selectedCurrentPrice = offer(selectedPriceInfo?.currentPrice) ?? offer(rootPriceInfo?.currentPrice);
+  const selectedImageInfo = offer(selection?.selected.imageInfo);
+  const rootImageInfo = offer(selection?.root.imageInfo);
+  const rawTitle = str(selection?.selected.productName) ?? str(selection?.selected.name) ?? str(selection?.root.name) ?? str(product?.name) ?? meta(html, "og:title");
+  const rawImage = image(product?.image) ??
+    image(selectedImageInfo?.allImages ?? selectedImageInfo?.thumbnailUrl) ??
+    image(rootImageInfo?.allImages ?? rootImageInfo?.thumbnailUrl) ??
+    image(selection?.selected.imageUrl ?? selection?.root.imageUrl) ?? meta(html, "og:image");
   if (!rawTitle) throw new ProductError("MISSING_TITLE", "extraction", "Walmart title unavailable");
   if (!rawImage) throw new ProductError("MISSING_IMAGE", "extraction", "Walmart product image unavailable");
   let imageUrl: string;
   try { imageUrl = validatePublicUrl(new URL(rawImage, resolvedUrl).href).href; }
   catch { throw new ProductError("MISSING_IMAGE", "extraction", "Walmart product image URL invalid"); }
-  const currentRaw = priceCandidate(offers?.price ?? offers?.lowPrice) ?? priceCandidate(priceInfo?.currentPrice) ?? meta(html, "product:price:amount");
+  const currentRaw = priceCandidate(selectedCurrentPrice) ?? priceCandidate(offers?.price ?? offers?.lowPrice) ??
+    (!selection?.multiVariant ? meta(html, "product:price:amount") : undefined);
   if (currentRaw === undefined) throw new ProductError("MISSING_PRICE", "extraction", "Walmart current price unavailable");
   let currentPrice;
-  try { currentPrice = normalizePrice(currentRaw, str(offers?.priceCurrency) ?? meta(html, "product:price:currency") ?? "USD"); }
+  try { currentPrice = normalizePrice(currentRaw, str(selectedCurrentPrice?.currencyUnit) ?? str(offers?.priceCurrency) ?? meta(html, "product:price:currency") ?? "USD"); }
   catch (error) { throw new ProductError("MISSING_PRICE", "extraction", `Walmart current price invalid: ${String(error)}`); }
   // Only explicit was/list prices qualify. JSON-LD highPrice is a range, not an old price.
-  const oldRaw = priceCandidate(offers?.wasPrice ?? offers?.listPrice ?? product?.wasPrice ?? product?.listPrice ?? priceInfo?.wasPrice ?? priceInfo?.listPrice) ??
-    meta(html, "product:original_price:amount");
+  const oldRaw = priceCandidate(selectedPriceInfo?.wasPrice ?? selectedPriceInfo?.listPrice) ??
+    priceCandidate(rootPriceInfo?.wasPrice ?? rootPriceInfo?.listPrice) ??
+    priceCandidate(offers?.wasPrice ?? offers?.listPrice ?? product?.wasPrice ?? product?.listPrice) ??
+    (!selection?.multiVariant ? meta(html, "product:original_price:amount") : undefined);
   let oldPrice;
   if (oldRaw !== undefined) {
     try {
@@ -93,7 +159,7 @@ export function extractWalmartProduct(html: string, inputUrl: string, resolvedUr
       if (parsed.value > currentPrice.value) oldPrice = parsed;
     } catch { /* A malformed optional old price is omitted, never invented. */ }
   }
-  const rawCanonical = str(product?.url) ?? html.match(/<link\b[^>]*rel=["']canonical["'][^>]*href=["']([^"']+)/i)?.[1];
+  const rawCanonical = str(selection?.root.canonicalUrl) ?? str(product?.url) ?? html.match(/<link\b[^>]*rel=["']canonical["'][^>]*href=["']([^"']+)/i)?.[1];
   let canonicalProductUrl: string | undefined;
   if (rawCanonical) {
     try { const url = validatePublicUrl(new URL(rawCanonical, resolvedUrl).href); if (url.hostname === "walmart.com" || url.hostname.endsWith(".walmart.com")) canonicalProductUrl = url.href; } catch { /* Optional. */ }
