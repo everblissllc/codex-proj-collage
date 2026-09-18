@@ -4,7 +4,7 @@ import { WorkersAICopyProvider } from "../ai/workers-ai-provider";
 import { BrowserScreenshotRenderer } from "../rendering/browser-renderer";
 import { BrowserMobilePageRenderer } from "../rendering/mobile-page-renderer";
 import { processProductLink } from "../orchestration/process-product-link";
-import { TelegramApi, TelegramApiError } from "./api";
+import { TelegramApi, TelegramApiError, telegramPhotoDiagnostics } from "./api";
 import { workerFetch } from "../network/worker-fetch";
 import { D1R2CardCache, cardCacheTtlSeconds } from "../cache/card-cache";
 import { AmazonCreatorsTokenManager, type CreatorsCredentialVersion } from "../stores/amazon/creators-token-manager";
@@ -113,7 +113,7 @@ export async function processTelegramJob(job: TelegramJob, env: Env): Promise<vo
   const telegram = new TelegramApi(env.TELEGRAM_BOT_TOKEN);
   console.log(JSON.stringify({ event: "queue_job_started", requestId, telegramUserId }));
   const deliveryDiagnostics = (error: unknown) => error instanceof TelegramApiError
-    ? { httpStatus: error.httpStatus, telegramErrorCode: error.telegramErrorCode, telegramDescriptionCategory: error.telegramDescriptionCategory }
+    ? { httpStatus: error.httpStatus, telegramErrorCode: error.telegramErrorCode, telegramDescriptionCategory: error.telegramDescriptionCategory, telegramDescription: error.telegramDescription }
     : { telegramDescriptionCategory: "UNKNOWN" };
   const sendErrorMessage = async (message: string): Promise<void> => {
     try {
@@ -151,6 +151,7 @@ export async function processTelegramJob(job: TelegramJob, env: Env): Promise<vo
     return;
   }
   try {
+    console.log(JSON.stringify({ event: "telegram_photo_prepared", requestId, ...telegramPhotoDiagnostics(result.card) }));
     await telegram.sendPhoto(chatId, result.card);
     console.log(JSON.stringify({ event: "telegram_photo_sent", requestId, telegramUserId }));
   } catch (error) {

@@ -16,7 +16,7 @@ const { walmartCardHtml } = src("stores/walmart/template.js");
 const { BrowserScreenshotRenderer, browserRateLimitDelayMs } = src("rendering/browser-renderer.js");
 const { processProductLink } = src("orchestration/process-product-link.js");
 const { handleTelegramWebhook, processTelegramJob, telegramErrorMessage } = src("telegram/webhook.js");
-const { TelegramApi } = src("telegram/api.js");
+const { safeTelegramDescription, telegramPhotoDiagnostics, TelegramApi } = src("telegram/api.js");
 const { ProductError } = src("types.js");
 const withWas = readFileSync("test/fixtures/walmart-with-was.html", "utf8");
 const currentOnly = readFileSync("test/fixtures/walmart-current-only.html", "utf8");
@@ -277,6 +277,37 @@ test("Telegram native copy buttons include up to 256 characters and omit only an
   assert.equal(bodies[2].text, `Facebook Comment:\n${fullComment}`);
   assert.equal(bodies[2].reply_markup, undefined);
   assert.ok(bodies[2].text.endsWith(longPostUrl));
+});
+test("Telegram photo diagnostics inspect PNG dimensions and multipart upload without changing bytes", async () => {
+  const validPng = Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
+  assert.deepEqual(telegramPhotoDiagnostics({ bytes: validPng, mimeType: "image/png" }), {
+    mimeType: "image/png", byteSize: validPng.byteLength, validPng: true, width: 1, height: 1, telegramPhotoLimitsValid: true
+  });
+  assert.equal(telegramPhotoDiagnostics({ bytes: Uint8Array.from([137, 80, 78, 71]), mimeType: "image/png" }).validPng, false);
+  let requestBody;
+  const telegram = new TelegramApi("test-token", async (_url, init) => { requestBody = init.body; return Response.json({ ok: true }); });
+  await telegram.sendPhoto(123, { bytes: validPng, mimeType: "image/png" });
+  assert.equal(requestBody.get("chat_id"), "123");
+  const photo = requestBody.get("photo");
+  assert.equal(photo.name, "product-card.png");
+  assert.equal(photo.type, "image/png");
+  assert.equal(photo.size, validPng.byteLength);
+  assert.deepEqual(new Uint8Array(await photo.arrayBuffer()), validPng);
+});
+test("Telegram preserves only bounded non-sensitive API descriptions", async () => {
+  assert.equal(safeTelegramDescription("Bad Request: PHOTO_INVALID_DIMENSIONS"), "Bad Request: PHOTO_INVALID_DIMENSIONS");
+  assert.equal(safeTelegramDescription("Bad Request: failed to process image"), "Bad Request: failed to process image");
+  assert.equal(safeTelegramDescription("see https://secret.example/path"), undefined);
+  assert.equal(safeTelegramDescription("chat 123456789 not found"), undefined);
+  const telegram = new TelegramApi("test-token", async () => Response.json({
+    ok: false, error_code: 400, description: "Bad Request: PHOTO_INVALID_DIMENSIONS", parameters: { retry_after: 1 }
+  }, { status: 400 }));
+  await assert.rejects(telegram.sendPhoto(123, { bytes: Uint8Array.from([137, 80, 78, 71]), mimeType: "image/png" }), error => {
+    assert.equal(error.telegramDescription, "Bad Request: PHOTO_INVALID_DIMENSIONS");
+    assert.equal(error.telegramDescriptionCategory, "INVALID_PHOTO");
+    assert.equal("parameters" in error, false);
+    return true;
+  });
 });
 const validAiDraft = { shortTitle: "Disney Toniebox Starter Set", facebookHookTemplate: "okayyy {{SHORT_TITLE}} for {{PRICE}}?! 👀🔥\nLink in Comment !! 🔗⬇️" };
 const aiResponse = draft => ({ response: JSON.stringify(draft) });

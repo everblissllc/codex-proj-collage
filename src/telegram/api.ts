@@ -10,11 +10,34 @@ export class TelegramApiError extends Error {
   constructor(
     readonly httpStatus: number | undefined,
     readonly telegramErrorCode: number | undefined,
-    readonly telegramDescriptionCategory: TelegramDescriptionCategory
+    readonly telegramDescriptionCategory: TelegramDescriptionCategory,
+    readonly telegramDescription?: string
   ) {
     super("Telegram API request failed");
     this.name = "TelegramApiError";
   }
+}
+
+export function safeTelegramDescription(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  if (!text || [...text].length > 200 || /[\r\n\u0000-\u001f\u007f]/.test(text)) return undefined;
+  if (/https?:\/\/|bot\d{6,}:[A-Za-z0-9_-]{20,}|\b\d{8,}\b/i.test(text)) return undefined;
+  return /^[\x20-\x7e]+$/.test(text) ? text : undefined;
+}
+
+export function telegramPhotoDiagnostics(image: CardImage): {
+  mimeType: string; byteSize: number; validPng: boolean; width?: number; height?: number; telegramPhotoLimitsValid: boolean;
+} {
+  const bytes = image.bytes;
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+  const validPng = bytes.length >= 24 && signature.every((byte, index) => bytes[index] === byte) &&
+    String.fromCharCode(...bytes.subarray(12, 16)) === "IHDR";
+  const view = validPng ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) : undefined;
+  const width = view?.getUint32(16);
+  const height = view?.getUint32(20);
+  const validDimensions = Boolean(width && height && width + height <= 10_000 && Math.max(width, height) / Math.min(width, height) <= 20);
+  return { mimeType: image.mimeType, byteSize: bytes.byteLength, validPng, width, height, telegramPhotoLimitsValid: validPng && bytes.byteLength <= 10_000_000 && validDimensions };
 }
 
 function descriptionCategory(description: unknown, status: number): TelegramDescriptionCategory {
@@ -53,7 +76,8 @@ export class TelegramApi {
         response.status,
         telegramErrorCode,
         data ? descriptionCategory(data.description, telegramErrorCode ?? response.status)
-          : response.ok ? "INVALID_RESPONSE" : descriptionCategory(undefined, response.status)
+          : response.ok ? "INVALID_RESPONSE" : descriptionCategory(undefined, response.status),
+        safeTelegramDescription(data?.description)
       );
     }
   }
