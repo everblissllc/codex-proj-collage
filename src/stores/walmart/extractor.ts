@@ -79,6 +79,8 @@ function embeddedSelection(html: string, resolvedUrl: string): EmbeddedSelection
   if (!itemId) variantFailure("Walmart URL item identity is unavailable");
   const rootItemId = str(product.usItemId);
   if (rootItemId && rootItemId !== itemId) variantFailure("Walmart root product does not match the URL item");
+  const rootCanonicalItemId = linkedWalmartItemId(product.canonicalUrl, resolvedUrl);
+  if (rootCanonicalItemId && rootCanonicalItemId !== itemId) variantFailure("Walmart canonical product does not match the URL item");
 
   const variantsMap = record(product.variantsMap);
   const variantCount = variantsMap ? Object.keys(variantsMap).length : 0;
@@ -86,28 +88,48 @@ function embeddedSelection(html: string, resolvedUrl: string): EmbeddedSelection
     ? product.selectedVariantIds.filter((value): value is string => typeof value === "string" && Boolean(value.trim()))
     : [];
   const displayVariantProductId = str(product.displayVariantProductId);
+  const rootProductId = str(product.id);
   const variantProductIdMap = record(product.variantProductIdMap);
   const multiVariant = variantCount > 1 || selectedVariantIds.length > 0 || Boolean(displayVariantProductId);
 
-  if (!multiVariant) {
+  if (!selectedVariantIds.length) {
     if (!rootItemId) variantFailure("Walmart embedded product identity is unavailable");
-    return { root: product, selected: product, multiVariant: false };
+    if (!displayVariantProductId) {
+      if (variantCount > 1) variantFailure("Walmart multi-variant selection is unavailable");
+      return { root: product, selected: product, multiVariant: false };
+    }
+    if (rootProductId && rootProductId !== displayVariantProductId) {
+      variantFailure("Walmart root product ID conflicts with the displayed product");
+    }
+    const displayed = record(variantsMap?.[displayVariantProductId]);
+    if (!displayed) {
+      if (variantCount > 0) variantFailure("Walmart displayed product record is unavailable");
+      return { root: product, selected: product, multiVariant: false };
+    }
+    if (str(displayed.usItemId) !== itemId) variantFailure("Walmart displayed product does not match the URL item");
+    if (str(displayed.id) && str(displayed.id) !== displayVariantProductId) {
+      variantFailure("Walmart displayed product ID conflicts with the selected record");
+    }
+    return { root: product, selected: displayed, multiVariant: variantCount > 1 };
   }
 
-  if (!rootItemId || !displayVariantProductId || !selectedVariantIds.length || !variantProductIdMap || !variantsMap) {
+  if (!rootItemId || !displayVariantProductId || !variantsMap) {
     variantFailure("Walmart selected variant state is incomplete");
-  }
-  const mappedIds = selectedVariantIds.map(id => str(variantProductIdMap[id]));
-  if (mappedIds.some(id => !id) || mappedIds.some(id => id !== displayVariantProductId)) {
-    variantFailure("Walmart selected variant mapping conflicts with the displayed variant");
   }
   const selected = record(variantsMap[displayVariantProductId]);
   if (!selected) variantFailure("Walmart selected variant record is unavailable");
   if (str(selected.usItemId) !== itemId) variantFailure("Walmart selected variant does not match the URL item");
   if (str(selected.id) && str(selected.id) !== displayVariantProductId) variantFailure("Walmart selected variant ID conflicts with the displayed variant");
   const selectedAttributes = Array.isArray(selected.variants) ? selected.variants.filter(value => typeof value === "string") : [];
-  if (selectedAttributes.length && selectedVariantIds.some(id => !selectedAttributes.includes(id))) {
+  const selectedEvidence = selectedVariantIds.map(id => ({ mappedId: str(variantProductIdMap?.[id]), inSelectedRecord: selectedAttributes.includes(id) }));
+  if (selectedEvidence.some(evidence => evidence.mappedId && evidence.mappedId !== displayVariantProductId)) {
+    variantFailure("Walmart selected variant mapping conflicts with the displayed variant");
+  }
+  if (selectedAttributes.length && selectedEvidence.some(evidence => !evidence.mappedId && !evidence.inSelectedRecord)) {
     variantFailure("Walmart selected variant attributes conflict with the displayed variant");
+  }
+  if (!selectedAttributes.length && selectedEvidence.some(evidence => !evidence.mappedId) && rootProductId !== displayVariantProductId) {
+    variantFailure("Walmart selected attributes are not tied to the displayed product");
   }
   return { root: product, selected, multiVariant: true };
 }
