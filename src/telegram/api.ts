@@ -57,8 +57,10 @@ export class TelegramApi {
       );
     }
   }
-  sendMessage(chatId: number, text: string): Promise<void> {
-    return this.call("sendMessage", JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }), { "content-type": "application/json" });
+  sendMessage(chatId: number, text: string, copyButton?: { label: string; text: string }): Promise<void> {
+    const validCopyButton = copyButton && [...copyButton.text].length >= 1 && [...copyButton.text].length <= 256 ? copyButton : undefined;
+    const reply_markup = validCopyButton ? { inline_keyboard: [[{ text: validCopyButton.label, copy_text: { text: validCopyButton.text } }]] } : undefined;
+    return this.call("sendMessage", JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true, ...(reply_markup ? { reply_markup } : {}) }), { "content-type": "application/json" });
   }
   sendPhoto(chatId: number, image: CardImage): Promise<void> {
     const form = new FormData();

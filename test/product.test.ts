@@ -80,18 +80,20 @@ describe("copy and rendering", () => {
   it("rejects malformed Workers AI JSON", () => {
     expect(() => parseWorkersAIResponse({ response: "not json" })).toThrow();
   });
-  it("builds the exact post from the title, source prices, and original affiliate URL", async () => {
+  it("builds a URL-free post and an exact affiliate comment", async () => {
     const content = await generateProductCopy(product, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set with Elsa" }) }, "#Ad");
-    expect(content.facebookPost).toBe(`#Ad 🚨 Disney Toniebox Starter Set with Elsa is now $59.00, was $99.00.\n\n👉 ${input}`);
-    expect(content.facebookPost).not.toContain(walmart);
+    expect(content.facebookPost).toContain("$59.00");
+    expect(content.facebookPost).not.toMatch(/#Ad|https?:\/\/|\$99\.00|\bwas\b/i);
+    expect(content.facebookComment).toBe(`#Ad\n\nComment “Deal” 👇❤️\nSo you don’t miss any of our latest finds! 🎉\n✔️See it here: 👉 ${input}`);
   });
   it("omits the old price when the product has none", async () => {
     const currentOnlyProduct = extractWalmartProduct(currentOnly, input, walmart);
     const content = await generateProductCopy(currentOnlyProduct, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set" }) }, "#Ad");
-    expect(content.facebookPost).toBe(`#Ad 🚨 Disney Toniebox Starter Set is now $59.00.\n\n👉 ${input}`);
+    expect(content.facebookPost).toContain("$59.00");
+    expect(content.facebookPost).not.toMatch(/#Ad|https?:\/\//i);
   });
   it("shrinks and clamps long titles in the controlled template", () => {
-    const html = walmartCardHtml(product, { shortTitle: "Disney Toniebox Starter Set with Elsa and More Long Product Description Words", facebookPost: "" }, "data:image/png;base64,AAAA");
+    const html = walmartCardHtml(product, { shortTitle: "Disney Toniebox Starter Set with Elsa and More Long Product Description Words", facebookPost: "", facebookComment: "" }, "data:image/png;base64,AAAA");
     expect(html).toContain("font-size:49px");
     expect(html).toContain("-webkit-line-clamp:3");
     expect(html).toContain("object-fit:contain");
@@ -103,7 +105,7 @@ describe("copy and rendering", () => {
     expect(html).not.toMatch(/https?:\/\/|@import|<link\b|<script[^>]+src\s*=/i);
   });
   it("hides an absent old price", () => {
-    const html = walmartCardHtml({ ...product, oldPrice: undefined }, { shortTitle: "Disney Toniebox Starter Set", facebookPost: "" }, "data:image/png;base64,AAAA");
+    const html = walmartCardHtml({ ...product, oldPrice: undefined }, { shortTitle: "Disney Toniebox Starter Set", facebookPost: "", facebookComment: "" }, "data:image/png;base64,AAAA");
     expect(html).not.toContain("<span class=\"old-price\">");
   });
 });
@@ -123,7 +125,8 @@ describe("orchestration", () => {
       .mockResolvedValueOnce(new Response(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), { status: 200, headers: { "content-type": "image/png" } }));
     const result = await processProductLink(input, { fetcher, dnsCheck: async () => {}, copyProvider, renderer, disclosure: "#Ad", requestId: "test" });
     expect(result.product.resolvedUrl).toBe(walmart);
-    expect(result.content.facebookPost.endsWith(input)).toBe(true);
+    expect(result.content.facebookPost.includes(input)).toBe(false);
+    expect(result.content.facebookComment.endsWith(input)).toBe(true);
     expect(fetcher).toHaveBeenCalledTimes(3);
     expect(fetcher.mock.calls.map(([url]) => url)).toEqual([input, walmart, result.product.imageUrl]);
     expect(renderer.screenshot).toHaveBeenCalledTimes(1);

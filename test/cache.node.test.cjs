@@ -127,7 +127,7 @@ test("cache bindings absent retain the original uncached pipeline", async () => 
   const h = harness();
   const { value, logs } = await captureLogs(() => h.run(affiliateA, false));
   assert.deepEqual(h.counts, { page: 1, image: 1, ai: 1, browser: 1 });
-  assert.equal(value.content.facebookPost.endsWith(affiliateA), true);
+  assert.equal(value.content.facebookComment.endsWith(affiliateA), true);
   assert.equal(logs.find(log => log.event === "card_cache_disabled").reason, "CACHE_BINDINGS_MISSING");
   assert.equal(h.db.rows.size, 0);
 });
@@ -161,8 +161,8 @@ test("two unrelated Walmart pages without canonical IDs never touch or share cac
   assert.deepEqual(counts, { page: 2, image: 2, ai: 2, browser: 2, cache: 0 });
   assert.equal(results[0].product.canonicalProductUrl, undefined);
   assert.equal(results[1].product.canonicalProductUrl, undefined);
-  assert.equal(results[0].content.facebookPost.endsWith(affiliateA), true);
-  assert.equal(results[1].content.facebookPost.endsWith(affiliateB), true);
+  assert.equal(results[0].content.facebookComment.endsWith(affiliateA), true);
+  assert.equal(results[1].content.facebookComment.endsWith(affiliateB), true);
   assert.deepEqual(logs.filter(log => log.event === "card_cache_disabled").map(log => log.reason), ["CACHE_PRODUCT_ID_UNAVAILABLE", "CACHE_PRODUCT_ID_UNAVAILABLE"]);
   assert.equal(logs.some(log => log.event === "card_cache_lookup" || log.event === "card_cache_stored"), false);
   assert.ok(!JSON.stringify(logs).includes(affiliateA));
@@ -182,9 +182,9 @@ test("first miss stores title and PNG; fresh extraction on second affiliate link
   assert.deepEqual(h.counts, { page: 2, image: 1, ai: 1, browser: 1 });
   assert.deepEqual(results[0].card.bytes, results[1].card.bytes);
   assert.equal(results[0].content.shortTitle, results[1].content.shortTitle);
-  assert.equal(results[0].content.facebookPost.endsWith(affiliateA), true);
-  assert.equal(results[1].content.facebookPost.endsWith(affiliateB), true);
-  assert.ok(!results[1].content.facebookPost.includes(affiliateA));
+  assert.equal(results[0].content.facebookComment.endsWith(affiliateA), true);
+  assert.equal(results[1].content.facebookComment.endsWith(affiliateB), true);
+  assert.ok(!results[1].content.facebookComment.includes(affiliateA));
   assert.equal(logs.filter(log => log.event === "card_cache_stored").length, 1);
   assert.equal(logs.filter(log => log.event === "card_cache_hit").length, 1);
   assert.equal(h.db.rows.size, 1);
@@ -228,7 +228,7 @@ test("changed authoritative current or old price rebuilds a card", async () => {
     assert.ok(currentChanged.content.facebookPost.includes("$17.00"));
     h.setHtml(fixture.replace('"wasPrice":"99.00"', '"wasPrice":"79.99"'));
     const oldChanged = await h.run();
-    assert.ok(oldChanged.content.facebookPost.includes("$79.99"));
+    assert.ok(!oldChanged.content.facebookPost.includes("$79.99"));
   });
   assert.deepEqual(h.counts, { page: 3, image: 3, ai: 3, browser: 3 });
 });
@@ -307,8 +307,8 @@ test("concurrent different affiliate links share one claimed card build", async 
   h.setAiDelay(100);
   const { value: results, logs } = await captureLogs(() => Promise.all([h.run(affiliateA), h.run(affiliateB)]));
   assert.deepEqual(h.counts, { page: 2, image: 1, ai: 1, browser: 1 });
-  assert.equal(results[0].content.facebookPost.endsWith(affiliateA), true);
-  assert.equal(results[1].content.facebookPost.endsWith(affiliateB), true);
+  assert.equal(results[0].content.facebookComment.endsWith(affiliateA), true);
+  assert.equal(results[1].content.facebookComment.endsWith(affiliateB), true);
   assert.equal(logs.filter(log => log.event === "card_cache_build_claimed").length, 1);
   assert.equal(logs.filter(log => log.event === "card_cache_build_wait").length >= 1, true);
   assert.equal(logs.filter(log => log.event === "card_cache_hit").length, 1);

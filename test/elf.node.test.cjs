@@ -9,7 +9,7 @@ const { extractElfProduct, inspectElfHtml, elfAdapter } = src('stores/screenshot
 const { BrowserMobilePageRenderer } = src('rendering/mobile-page-renderer.js');
 const { processProductLink } = src('orchestration/process-product-link.js');
 const { WorkersAICopyProvider } = src('ai/workers-ai-provider.js');
-const { buildFacebookPost } = src('ai/build-facebook-post.js');
+const { buildFacebookComment, buildFacebookPost } = src('ai/build-facebook-post.js');
 const html = readFileSync('test/fixtures/elf-product.html', 'utf8');
 const input = 'https://affiliate.example.org/go?tag=UserA%2B1&x=2';
 const resolved = 'https://www.elfcosmetics.com/products/hydrating-camo-concealer/';
@@ -39,9 +39,12 @@ test('e.l.f. rejects missing/malformed price and non-product pages', () => {
   assert.throws(()=>extractElfProduct(html.replace('"price":8,',''),input,resolved),{code:'MISSING_PRICE'});
   assert.throws(()=>extractElfProduct('<html><h1>Sale</h1></html>',input,resolved),{code:'NOT_PRODUCT_PAGE'});
 });
-test('e.l.f. Facebook post with no old price is factual and uses exact original link',()=>{
+test('e.l.f. Facebook post uses current price while comment uses exact original link',()=>{
   const product=extractElfProduct(html.replace('"wasPrice":12','"highPrice":12'),input,resolved);
-  assert.equal(buildFacebookPost(product,'Hydrating Camo Concealer','#Ad'),`#Ad 🚨 Hydrating Camo Concealer is now $8.00.\n\n👉 ${input}`);
+  const post=buildFacebookPost(product,'Hydrating Camo Concealer');
+  assert.match(post,/\$8\.00/);
+  assert.doesNotMatch(post,/#Ad|https?:\/\//i);
+  assert.ok(buildFacebookComment(product).endsWith(input));
 });
 test('mobile Browser Quick Action uses supported viewport, region selector and validates PNG', async () => {
   const calls=[];
@@ -123,9 +126,11 @@ test('e.l.f. orchestration bypasses cache, Walmart card, image fetch and preserv
         disclosure:'#Ad',requestId:'elf-'+pages
       });
       assert.equal(fetches,2);
-      assert.ok(result.content.facebookPost.endsWith(url));
-      assert.ok(!result.content.facebookPost.includes(url===urls[0]?urls[1]:urls[0]));
-      assert.ok(result.content.facebookPost.includes('$8.00, was $12.00.'));
+      assert.ok(!result.content.facebookPost.includes(url));
+      assert.ok(result.content.facebookComment.endsWith(url));
+      assert.ok(!result.content.facebookComment.includes(url===urls[0]?urls[1]:urls[0]));
+      assert.ok(result.content.facebookPost.includes('$8.00'));
+      assert.ok(!result.content.facebookPost.includes('$12.00'));
     }
     assert.equal(ai,2);assert.equal(pages,2);assert.equal(cards,0);assert.equal(cache,0);
     assert.equal(logs.filter(x=>x.event==='card_cache_disabled'&&x.reason==='SCREENSHOT_STORE_CACHE_DISABLED').length,2);

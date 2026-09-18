@@ -1,6 +1,6 @@
 import type { CopyProvider } from "./provider";
 import { ProductError, type GeneratedContent, type ProductData } from "../types";
-import { buildFacebookPost } from "./build-facebook-post";
+import { buildFacebookComment, buildFacebookPost } from "./build-facebook-post";
 
 export type AiAttemptFailure = { attempt: number; errorCode: string; validationReason: string };
 export type GeneratedCopyResult = GeneratedContent & { attemptsUsed: number };
@@ -14,14 +14,15 @@ function retryableValidationError(error: unknown): ProductError | undefined {
   return undefined;
 }
 
-export async function generateProductCopy(product: ProductData, provider: CopyProvider, disclosure = "#Ad", onAttemptFailed?: (failure: AiAttemptFailure) => void): Promise<GeneratedCopyResult> {
+export async function generateProductCopy(product: ProductData, provider: CopyProvider, _disclosure = "#Ad", onAttemptFailed?: (failure: AiAttemptFailure) => void): Promise<GeneratedCopyResult> {
   let correctionReason: string | undefined;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const draft = await provider.generate(product.rawTitle, correctionReason);
       return {
         shortTitle: draft.shortTitle,
-        facebookPost: buildFacebookPost(product, draft.shortTitle, disclosure),
+        facebookPost: buildFacebookPost(product, draft.shortTitle, draft.facebookHookTemplate),
+        facebookComment: buildFacebookComment(product),
         attemptsUsed: attempt
       };
     } catch (error) {

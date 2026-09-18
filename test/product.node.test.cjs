@@ -9,12 +9,14 @@ const { resolveUrl } = src("stores/resolve-url.js");
 const { extractWalmartProduct } = src("stores/walmart/extractor.js");
 const { inspectWalmartHtml } = src("stores/walmart/diagnostics.js");
 const { normalizePrice } = src("stores/walmart/price.js");
-const { parseCopyDraft, parseWorkersAIResponse, WorkersAICopyProvider } = src("ai/workers-ai-provider.js");
+const { parseCopyDraft, parseWorkersAIResponse, validFacebookHookTemplate, WorkersAICopyProvider } = src("ai/workers-ai-provider.js");
 const { generateProductCopy } = src("ai/generate-product-copy.js");
+const { buildFacebookComment } = src("ai/build-facebook-post.js");
 const { walmartCardHtml } = src("stores/walmart/template.js");
 const { BrowserScreenshotRenderer, browserRateLimitDelayMs } = src("rendering/browser-renderer.js");
 const { processProductLink } = src("orchestration/process-product-link.js");
 const { handleTelegramWebhook, processTelegramJob, telegramErrorMessage } = src("telegram/webhook.js");
+const { TelegramApi } = src("telegram/api.js");
 const { ProductError } = src("types.js");
 const withWas = readFileSync("test/fixtures/walmart-with-was.html", "utf8");
 const currentOnly = readFileSync("test/fixtures/walmart-current-only.html", "utf8");
@@ -190,6 +192,7 @@ test("MISSING_TITLE logs fetched-page metadata immediately before failure withou
 });
 test("failed AI JSON content is rejected", () => {
   assert.throws(() => parseCopyDraft({ shortTitle: "Now $59" }), { code: "AI_INVALID_CONTENT", validationReason: "AI_SHORT_TITLE_HAS_PRICE" });
+  assert.throws(() => parseCopyDraft({ shortTitle: "Toniebox 29.99" }), { code: "AI_INVALID_CONTENT", validationReason: "AI_SHORT_TITLE_HAS_PRICE" });
   assert.throws(() => parseCopyDraft({ shortTitle: "Toniebox https://wrong.link" }), { code: "AI_INVALID_CONTENT", validationReason: "AI_SHORT_TITLE_HAS_URL" });
   assert.throws(() => parseCopyDraft({ shortTitle: "Disney Toniebox", facebookBody: "Buy" }), { code: "AI_INVALID_CONTENT", validationReason: "AI_UNEXPECTED_FIELD" });
 });
@@ -209,26 +212,73 @@ test("Workers AI provider makes one URL-free text inference and accepts fenced J
     assert.ok(!JSON.stringify(options).includes(p.currentPrice.formatted));
     assert.ok(!JSON.stringify(options).includes(p.oldPrice.formatted));
     assert.equal(options.messages.length, 2);
-    return { response: '```json\n{"shortTitle":"Disney Toniebox Starter Set"}\n```' };
+    return { response: '```json\n{"shortTitle":"Disney Toniebox Starter Set","facebookHookTemplate":"okayyy {{SHORT_TITLE}} for {{PRICE}}?! 👀🔥\\nLink in Comment !! 🔗⬇️"}\n```' };
   } }, "@cf/meta/llama-3.2-3b-instruct");
   const draft = await provider.generate(p.rawTitle);
   assert.equal(draft.shortTitle, "Disney Toniebox Starter Set");
+  assert.match(draft.facebookHookTemplate, /{{PRICE}}/);
   assert.equal(calls, 1);
   assert.throws(() => parseWorkersAIResponse({ response: { shortTitle: "Now $59" } }), { code: "AI_INVALID_CONTENT" });
 });
-test("current and old prices and exact affiliate URL are appended by code", async () => {
+test("Facebook post uses only trusted current price while comment owns disclosure and exact affiliate URL", async () => {
   const p = extractWalmartProduct(withWas, input, walmart);
-  const copy = await generateProductCopy(p, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set" }) }, "#Ad");
-  assert.equal(copy.facebookPost, `#Ad 🚨 Disney Toniebox Starter Set is now $59.00, was $99.00.\n\n👉 ${input}`);
-  assert.ok(!copy.facebookPost.includes(walmart));
-  assert.ok(!/daily wear|vacation trips|beach outings/i.test(copy.facebookPost));
+  const hook = "okayyy {{SHORT_TITLE}} for {{PRICE}}?! {{RETAILER}} is wild for this one 😂🔥\nLink in Comment !! 🔗⬇️";
+  const copy = await generateProductCopy(p, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set", facebookHookTemplate: hook }) }, "#Ad");
+  assert.equal(copy.facebookPost, "okayyy Disney Toniebox Starter Set for $59.00?! Walmart is wild for this one 😂🔥\nLink in Comment !! 🔗⬇️");
+  assert.doesNotMatch(copy.facebookPost, /#Ad|https?:\/\/|\$99\.00|\bwas\b|coupon|%/i);
+  assert.equal(copy.facebookComment, `#Ad\n\nComment “Deal” 👇❤️\nSo you don’t miss any of our latest finds! 🎉\n✔️See it here: 👉 ${input}`);
+  assert.equal((copy.facebookComment.match(/#Ad/g) ?? []).length, 1);
+  assert.ok(!copy.facebookComment.includes(walmart));
 });
-test("current-only Facebook post is built exactly from source price and affiliate URL", async () => {
-  const p = extractWalmartProduct(currentOnly, input, walmart);
-  const copy = await generateProductCopy(p, { generate: async () => ({ shortTitle: "Disney Toniebox Starter Set" }) }, "#Ad");
-  assert.equal(copy.facebookPost, `#Ad 🚨 Disney Toniebox Starter Set is now $59.00.\n\n👉 ${input}`);
+test("invalid AI hook facts are rejected and safely use deterministic fallback", async () => {
+  const p = extractWalmartProduct(withWas, input, walmart);
+  for (const hook of [
+    "{{SHORT_TITLE}} is only $5.00! {{PRICE}}", "{{SHORT_TITLE}} is 50% off at {{PRICE}}",
+    "{{SHORT_TITLE}} is on clearance with a coupon at {{PRICE}}", "only 29.99 for {{SHORT_TITLE}} at {{PRICE}}",
+    "https://wrong.example {{SHORT_TITLE}} {{PRICE}}"
+  ]) {
+    assert.equal(validFacebookHookTemplate(hook), false);
+    const parsed = parseCopyDraft({ shortTitle: "Disney Toniebox Starter Set", facebookHookTemplate: hook });
+    assert.equal(parsed.facebookHookTemplate, undefined);
+    const copy = await generateProductCopy(p, { generate: async () => parsed });
+    assert.equal(copy.facebookPost, "omggg Disney Toniebox Starter Set for $59.00?! this is such a good find 👀🔥\nLink in Comment !! 🔗⬇️");
+    assert.doesNotMatch(copy.facebookPost, /\$5\.00|29\.99|50%|coupon|clearance|https?:\/\//i);
+  }
 });
-const validAiDraft = { shortTitle: "Disney Toniebox Starter Set" };
+test("trusted numeric product names survive placeholder substitution without permitting hook numbers", async () => {
+  const p = extractWalmartProduct(withWas, input, walmart);
+  const hook = "okayyy {{SHORT_TITLE}} for {{PRICE}}?! 👀🔥";
+  for (const shortTitle of ["No. 7 Bonding Oil", "3-in-1 Charger", "16 oz Cleanser", "iPhone 16 Case", "32-Piece Toy Set"]) {
+    assert.equal(parseCopyDraft({ shortTitle, facebookHookTemplate: hook }).shortTitle, shortTitle);
+    const copy = await generateProductCopy(p, { generate: async () => ({ shortTitle, facebookHookTemplate: hook }) });
+    assert.ok(copy.facebookPost.includes(shortTitle));
+    assert.ok(copy.facebookPost.includes(p.currentPrice.formatted));
+  }
+  assert.equal(validFacebookHookTemplate("only 29.99 for {{SHORT_TITLE}} at {{PRICE}}"), false);
+});
+test("Telegram native copy buttons include up to 256 characters and omit only an oversized button", async () => {
+  const bodies = [];
+  const telegram = new TelegramApi("test-token", async (_url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return Response.json({ ok: true });
+  });
+  const shortComment = "short comment";
+  await telegram.sendMessage(123, `Facebook Comment:\n${shortComment}`, { label: "Copy Comment", text: shortComment });
+  assert.equal(bodies[0].reply_markup.inline_keyboard[0][0].copy_text.text, shortComment);
+
+  const exactLimit = "x".repeat(256);
+  await telegram.sendMessage(123, `Facebook Comment:\n${exactLimit}`, { label: "Copy Comment", text: exactLimit });
+  assert.equal(bodies[1].reply_markup.inline_keyboard[0][0].copy_text.text, exactLimit);
+
+  const longPostUrl = `https://joylink.io/go?tracking=${"a".repeat(220)}`;
+  const fullComment = buildFacebookComment({ ...extractWalmartProduct(withWas, input, walmart), inputUrl: longPostUrl, postUrl: longPostUrl });
+  assert.ok([...fullComment].length > 256);
+  await telegram.sendMessage(123, `Facebook Comment:\n${fullComment}`, { label: "Copy Comment", text: fullComment });
+  assert.equal(bodies[2].text, `Facebook Comment:\n${fullComment}`);
+  assert.equal(bodies[2].reply_markup, undefined);
+  assert.ok(bodies[2].text.endsWith(longPostUrl));
+});
+const validAiDraft = { shortTitle: "Disney Toniebox Starter Set", facebookHookTemplate: "okayyy {{SHORT_TITLE}} for {{PRICE}}?! 👀🔥\nLink in Comment !! 🔗⬇️" };
 const aiResponse = draft => ({ response: JSON.stringify(draft) });
 function sequenceProvider(responses) {
   const requests = [];
@@ -244,7 +294,8 @@ test("valid AI title succeeds after exactly one inference", async () => {
   const content = await generateProductCopy(p, provider);
   assert.equal(content.attemptsUsed, 1);
   assert.equal(requests.length, 1);
-  assert.ok(content.facebookPost.endsWith(input));
+  assert.ok(!content.facebookPost.includes(input));
+  assert.ok(content.facebookComment.endsWith(input));
 });
 for (const [name, firstResponse, reason] of [
   ["malformed JSON", { response: "not json" }, "AI_BAD_JSON"],
@@ -267,7 +318,8 @@ for (const [name, firstResponse, reason] of [
     assert.ok(requests.every(request => !JSON.stringify(request.options).includes(input)));
     assert.ok(requests.every(request => !JSON.stringify(request.options).includes(p.currentPrice.formatted)));
     assert.ok(requests.every(request => !JSON.stringify(request.options).includes(p.oldPrice.formatted)));
-    assert.ok(content.facebookPost.endsWith(input));
+    assert.ok(!content.facebookPost.includes(input));
+    assert.ok(content.facebookComment.endsWith(input));
   });
 }
 test("two malformed AI responses fail with AI_INVALID_CONTENT after exactly two attempts", async () => {
@@ -682,7 +734,8 @@ test("JoyLink path text never selects a retailer; final Walmart destination does
   assert.equal(result.product.store, "walmart");
   assert.equal(result.product.postUrl, joyLink);
   assert.equal(result.product.resolvedUrl, walmart);
-  assert.ok(result.content.facebookPost.endsWith(joyLink));
+  assert.ok(!result.content.facebookPost.includes(joyLink));
+  assert.ok(result.content.facebookComment.endsWith(joyLink));
 });
 test("unknown final hosts remain unsupported and extraction errors no longer claim Walmart", async () => {
   const tracker = "https://tracker.example.org/click/unknown";
@@ -739,7 +792,7 @@ test("Telegram webhook authenticates and enqueues exact link", async () => {
   assert.equal(queued.chatId, 123);
   assert.equal(queued.telegramUserId, 456);
 });
-test("mocked Telegram job sends progress, card, and separate affiliate copy", async () => {
+test("mocked Telegram job sends card, separate post/comment, and exact native copy text", async () => {
   const original = global.fetch;
   const sent = [];
   let screenshotCalls = 0;
@@ -762,9 +815,17 @@ test("mocked Telegram job sends progress, card, and separate affiliate copy", as
     };
     const env = { TELEGRAM_BOT_TOKEN: "test-token", AI_TEXT_MODEL: "@cf/meta/llama-3.2-3b-instruct", AI: { run: async (model, options) => { aiCalls++; assert.equal(model, "@cf/meta/llama-3.2-3b-instruct"); assert.ok(!JSON.stringify(options).includes(input)); return { response: JSON.stringify({ shortTitle: "Disney Toniebox Starter Set" }) }; } }, AFFILIATE_DISCLOSURE: "#Ad", BROWSER: { quickAction: async (action, options) => { screenshotCalls++; assert.equal(action, "screenshot"); assert.ok(options.html.includes("data:image/png;base64,")); assert.ok(!options.html.includes(input)); return new Response(png, { headers: { "content-type": "image/png" } }); } } };
     await processTelegramJob({ chatId: 123, inputUrl: input, telegramUserId: 456, requestId: "end-to-end-test" }, env);
-    assert.deepEqual(sent.map(x => x.method), ["sendMessage", "sendPhoto", "sendMessage"]);
+    assert.deepEqual(sent.map(x => x.method), ["sendMessage", "sendPhoto", "sendMessage", "sendMessage"]);
     assert.match(sent[0].body.text, /Creating your product card/);
-    assert.equal(sent[2].body.text, `✅ Facebook post:\n\n#Ad 🚨 Disney Toniebox Starter Set is now $59.00, was $99.00.\n\n👉 ${input}`);
+    const facebookPost = "omggg Disney Toniebox Starter Set for $59.00?! this is such a good find 👀🔥\nLink in Comment !! 🔗⬇️";
+    const facebookComment = `#Ad\n\nComment “Deal” 👇❤️\nSo you don’t miss any of our latest finds! 🎉\n✔️See it here: 👉 ${input}`;
+    assert.equal(sent[2].body.text, `Facebook Post:\n${facebookPost}`);
+    assert.deepEqual(sent[2].body.reply_markup.inline_keyboard, [[{ text: "Copy FB Post", copy_text: { text: facebookPost } }]]);
+    assert.equal(sent[3].body.text, `Facebook Comment:\n${facebookComment}`);
+    assert.deepEqual(sent[3].body.reply_markup.inline_keyboard, [[{ text: "Copy Comment", copy_text: { text: facebookComment } }]]);
+    assert.ok(!facebookPost.includes("#Ad"));
+    assert.ok(!facebookPost.includes(input));
+    assert.equal((facebookComment.match(/#Ad/g) ?? []).length, 1);
     assert.equal(screenshotCalls, 1);
     assert.equal(aiCalls, 1);
   } finally { global.fetch = original; }
@@ -888,7 +949,7 @@ async function runTelegramDeliveryCase(reply, requestId) {
 test("failed progress status is nonessential; photo and copy still deliver", async () => {
   const { sent, logs, errors } = await runTelegramDeliveryCase((method, body, call) =>
     call === 1 ? Response.json({ ok: false, error_code: 429, description: "Too Many Requests: retry after 1" }, { status: 429 }) : Response.json({ ok: true }), "progress-failure-test");
-  assert.deepEqual(sent.map(item => item.method), ["sendMessage", "sendPhoto", "sendMessage"]);
+  assert.deepEqual(sent.map(item => item.method), ["sendMessage", "sendPhoto", "sendMessage", "sendMessage"]);
   assert.equal(errors.find(item => item.event === "telegram_delivery_failed").operation, "send_progress");
   assert.equal(errors.find(item => item.event === "telegram_delivery_failed").telegramDescriptionCategory, "RATE_LIMIT");
   assert.equal(logs.find(item => item.event === "process_complete").success, true);
@@ -912,8 +973,8 @@ test("photo delivery failure reports image delivery, not card creation", async (
   assert.ok(!JSON.stringify(errors).includes("telegramUserId"));
 });
 
-test("copy delivery failure preserves sent photo and reports only copy failure", async () => {
-  const { sent, logs, errors } = await runTelegramDeliveryCase((method, body) => method === "sendMessage" && body.text.startsWith("✅ Facebook post:")
+test("post delivery failure preserves sent photo and reports only post failure", async () => {
+  const { sent, logs, errors } = await runTelegramDeliveryCase((method, body) => method === "sendMessage" && body.text.startsWith("Facebook Post:")
     ? Response.json({ ok: false, error_code: 400, description: "Bad Request: message is too long" }, { status: 400 })
     : Response.json({ ok: true }), "copy-failure-test");
   assert.deepEqual(sent.map(item => item.method), ["sendMessage", "sendPhoto", "sendMessage", "sendMessage"]);
@@ -922,7 +983,7 @@ test("copy delivery failure preserves sent photo and reports only copy failure",
   assert.ok(!logs.some(item => item.event === "telegram_copy_sent"));
   assert.ok(logs.some(item => item.event === "process_complete" && item.success === true));
   const failure = errors.find(item => item.event === "telegram_delivery_failed");
-  assert.equal(failure.operation, "send_copy");
+  assert.equal(failure.operation, "send_post");
   assert.equal(failure.httpStatus, 400);
   assert.equal(failure.telegramErrorCode, 400);
   assert.equal(failure.telegramDescriptionCategory, "MESSAGE_TOO_LONG");
@@ -930,9 +991,24 @@ test("copy delivery failure preserves sent photo and reports only copy failure",
   assert.ok(!JSON.stringify(errors).includes(input));
 });
 
+test("comment delivery failure does not retry or regenerate either Facebook text", async () => {
+  const { sent, logs, errors } = await runTelegramDeliveryCase((method, body) => method === "sendMessage" && body.text.startsWith("Facebook Comment:")
+    ? Response.json({ ok: false, error_code: 400, description: "Bad Request: button text is invalid" }, { status: 400 })
+    : Response.json({ ok: true }), "comment-failure-test");
+  assert.deepEqual(sent.map(item => item.method), ["sendMessage", "sendPhoto", "sendMessage", "sendMessage", "sendMessage"]);
+  assert.equal(sent[4].body.text, "Your card and post were sent, but I couldn't send the Facebook comment. Please try again.");
+  assert.ok(logs.some(item => item.event === "telegram_photo_sent"));
+  assert.ok(!logs.some(item => item.event === "telegram_copy_sent"));
+  const failure = errors.find(item => item.event === "telegram_delivery_failed");
+  assert.equal(failure.operation, "send_comment");
+  assert.equal(failure.httpStatus, 400);
+  assert.equal(sent.filter(item => item.body?.text?.startsWith("Facebook Post:")).length, 1);
+  assert.equal(sent.filter(item => item.body?.text?.startsWith("Facebook Comment:")).length, 1);
+});
+
 test("successful photo and copy delivery has no Telegram failure event", async () => {
   const { sent, logs, errors } = await runTelegramDeliveryCase(() => Response.json({ ok: true }), "delivery-success-test");
-  assert.deepEqual(sent.map(item => item.method), ["sendMessage", "sendPhoto", "sendMessage"]);
+  assert.deepEqual(sent.map(item => item.method), ["sendMessage", "sendPhoto", "sendMessage", "sendMessage"]);
   assert.ok(logs.some(item => item.event === "telegram_photo_sent"));
   assert.ok(logs.some(item => item.event === "telegram_copy_sent"));
   assert.ok(!errors.some(item => item.event === "telegram_delivery_failed"));

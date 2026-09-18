@@ -5,7 +5,7 @@ import { validatePublicUrl, type DnsCheck } from "../stores/safe-url";
 import { extractWalmartProduct } from "../stores/walmart/extractor";
 import { inspectWalmartHtml, walmartProductId } from "../stores/walmart/diagnostics";
 import { generateProductCopy } from "../ai/generate-product-copy";
-import { buildFacebookPost } from "../ai/build-facebook-post";
+import { buildFacebookComment, buildFacebookPost } from "../ai/build-facebook-post";
 import type { CopyProvider } from "../ai/provider";
 import { renderCard } from "../rendering/render-card";
 import type { CardImage, ScreenshotRenderer } from "../rendering/types";
@@ -177,7 +177,7 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
     let content: GeneratedContent;
     let card: CardImage;
     if (cacheHit) {
-      content = { shortTitle: cacheHit.shortTitle, facebookPost: buildFacebookPost(product, cacheHit.shortTitle, deps.disclosure) };
+      content = { shortTitle: cacheHit.shortTitle, facebookPost: buildFacebookPost(product, cacheHit.shortTitle), facebookComment: buildFacebookComment(product) };
       card = cacheHit.card;
       aiDurationMs = 0;
       renderDurationMs = 0;

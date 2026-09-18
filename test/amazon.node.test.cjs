@@ -11,7 +11,7 @@ const { AmazonCreatorsApiClient, AmazonCreatorsAuthError, amazonCreatorsGetItems
 const { mapCreatorsItem } = src("stores/amazon/creators-api-product.js");
 const { AMAZON_CREATORS_RESOURCES } = src("stores/amazon/creators-api-types.js");
 const { processProductLink } = src("orchestration/process-product-link.js");
-const { buildFacebookPost } = src("ai/build-facebook-post.js");
+const { buildFacebookComment, buildFacebookPost } = src("ai/build-facebook-post.js");
 
 const saleUrl = "https://www.amazon.com/dp/B08HNBHSQV";
 const affiliate = "https://www.amazon.com/dp/B08HNBHSQV?tag=partner-20&th=1";
@@ -289,7 +289,7 @@ test("Creators ignores coupon and promotion metadata when selecting current pric
   assert.equal(product.amazon.savings, undefined);
 });
 
-test("Creators LIST_PRICE retains list-price semantics while WAS_PRICE is rejected", () => {
+test("Creators LIST_PRICE retains card metadata while Facebook post omits all reference prices", () => {
   const price = {
     money: { amount: 24.99, currency: "USD", displayAmount: "$24.99" },
     savingBasis: { money: { amount: 39.99, currency: "USD", displayAmount: "$39.99" }, savingBasisType: "LIST_PRICE" },
@@ -299,7 +299,10 @@ test("Creators LIST_PRICE retains list-price semantics while WAS_PRICE is reject
   assert.equal(listPrice.oldPrice.formatted, "$39.99");
   assert.equal(listPrice.amazon.referencePriceType, "LIST_PRICE");
   assert.equal(listPrice.amazon.savings.percentage, 38);
-  assert.equal(buildFacebookPost(listPrice, "ESR Magnetic Car Charger", "#Ad"), `#Ad 🚨 ESR Magnetic Car Charger is now $24.99, list price $39.99.\n\n👉 ${affiliate}`);
+  const listPost = buildFacebookPost(listPrice, "ESR Magnetic Car Charger");
+  assert.match(listPost, /\$24\.99/);
+  assert.doesNotMatch(listPost, /#Ad|\$39\.99|list price|\bwas\b|https?:\/\//i);
+  assert.ok(buildFacebookComment(listPrice).endsWith(affiliate));
 
   const wasPrice = mapCreatorsItem(creatorsItem({ offersV2: { listings: [creatorsListing({ price: {
     ...price, savingBasis: { ...price.savingBasis, savingBasisType: "WAS_PRICE" }
@@ -307,16 +310,18 @@ test("Creators LIST_PRICE retains list-price semantics while WAS_PRICE is reject
   assert.equal(wasPrice.oldPrice, undefined);
   assert.equal(wasPrice.amazon.referencePriceType, undefined);
   assert.equal(wasPrice.amazon.savings, undefined);
-  assert.equal(buildFacebookPost(wasPrice, "ESR Magnetic Car Charger", "#Ad"), `#Ad 🚨 ESR Magnetic Car Charger is now $24.99.\n\n👉 ${affiliate}`);
+  assert.doesNotMatch(buildFacebookPost(wasPrice, "ESR Magnetic Car Charger"), /#Ad|\$39\.99|list price|\bwas\b|https?:\/\//i);
 });
 
-test("Amazon Facebook copy uses current price only and never treats untyped reference data as was-price", () => {
+test("Amazon Facebook post uses current price only and keeps affiliate URL in comment", () => {
   const currentOnly = mapCreatorsItem(creatorsItem(), "B08HNBHSQV", affiliate, saleUrl);
-  assert.equal(buildFacebookPost(currentOnly, "ESR Magnetic Car Charger", "#Ad"), `#Ad 🚨 ESR Magnetic Car Charger is now $24.99.\n\n👉 ${affiliate}`);
+  const currentCopy = buildFacebookPost(currentOnly, "ESR Magnetic Car Charger");
+  assert.match(currentCopy, /\$24\.99/);
+  assert.doesNotMatch(currentCopy, /#Ad|https?:\/\//i);
   const untypedReference = { ...currentOnly, oldPrice: { value: 39.99, formatted: "$39.99", currency: "USD" } };
-  const copy = buildFacebookPost(untypedReference, "ESR Magnetic Car Charger", "#Ad");
-  assert.equal(copy, `#Ad 🚨 ESR Magnetic Car Charger is now $24.99.\n\n👉 ${affiliate}`);
-  assert.doesNotMatch(copy, /\bwas\b/i);
+  const copy = buildFacebookPost(untypedReference, "ESR Magnetic Car Charger");
+  assert.doesNotMatch(copy, /\$39\.99|\bwas\b|list price|#Ad|https?:\/\//i);
+  assert.equal(buildFacebookComment(currentOnly), `#Ad\n\nComment “Deal” 👇❤️\nSo you don’t miss any of our latest finds! 🎉\n✔️See it here: 👉 ${affiliate}`);
 });
 
 test("Creators reference price is omitted when not higher, currency differs, or semantics are unsupported", () => {
@@ -451,7 +456,9 @@ test("Amazon Creators orchestration preserves exact affiliate URL, isolates AI, 
   assert.equal(renders, 1);
   assert.equal(cacheCalls, 0);
   assert.equal(result.product.postUrl, affiliate);
-  assert.equal(result.content.facebookPost, `#Ad 🚨 ESR Magnetic Car Charger is now $24.99, list price $39.99.\n\n👉 ${affiliate}`);
+  assert.match(result.content.facebookPost, /\$24\.99/);
+  assert.doesNotMatch(result.content.facebookPost, /#Ad|\$39\.99|38%|list price|https?:\/\//i);
+  assert.ok(result.content.facebookComment.endsWith(affiliate));
 });
 
 test("Amazon short and multi-hop tracking links route by final destination and preserve exact postUrl", async () => {
@@ -486,7 +493,8 @@ test("Amazon short and multi-hop tracking links route by final destination and p
     assert.equal(providerAsin, "B08HNBHSQV");
     assert.equal(result.product.store, "amazon");
     assert.equal(result.product.postUrl, current.input);
-    assert.ok(result.content.facebookPost.endsWith(current.input));
+    assert.ok(!result.content.facebookPost.includes(current.input));
+    assert.ok(result.content.facebookComment.endsWith(current.input));
   }
 });
 
@@ -512,7 +520,8 @@ test("Amazon CLP redirect retains original ASIN and exact postUrl through Creato
   assert.equal(providerAsin, "B08HNBHSQV");
   assert.equal(result.product.resolvedUrl, clpUrl);
   assert.equal(result.product.postUrl, affiliate);
-  assert.ok(result.content.facebookPost.endsWith(affiliate));
+  assert.ok(!result.content.facebookPost.includes(affiliate));
+  assert.ok(result.content.facebookComment.endsWith(affiliate));
 });
 
 test("Amazon CLP flow rejects a mismatched Creators ASIN and supported-route redirect before API", async () => {

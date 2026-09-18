@@ -24,8 +24,8 @@ export type ProductData = {
   oldPrice?: Price;
   amazon?: AmazonProductMetadata;
 };
-export type GeneratedContent = { shortTitle: string; facebookPost: string };
-export type CopyDraft = { shortTitle: string };
+export type GeneratedContent = { shortTitle: string; facebookPost: string; facebookComment: string };
+export type CopyDraft = { shortTitle: string; facebookHookTemplate?: string };
 export type BrowserDiagnostics = {
   browserStatus?: number;
   browserStatusText?: string;

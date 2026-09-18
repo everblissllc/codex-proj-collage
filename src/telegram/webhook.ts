@@ -122,7 +122,7 @@ export async function processTelegramJob(job: TelegramJob, env: Env): Promise<vo
       console.error(JSON.stringify({ event: "telegram_error_message_failed", requestId, operation: "send_error_message", errorCode: "TELEGRAM_API_ERROR", ...deliveryDiagnostics(error) }));
     }
   };
-  const logDeliveryFailure = (operation: "send_progress" | "send_photo" | "send_copy", error: unknown): void => {
+  const logDeliveryFailure = (operation: "send_progress" | "send_photo" | "send_post" | "send_comment", error: unknown): void => {
     console.error(JSON.stringify({ event: "telegram_delivery_failed", requestId, operation, errorCode: "TELEGRAM_API_ERROR", ...deliveryDiagnostics(error) }));
   };
   try {
@@ -159,10 +159,17 @@ export async function processTelegramJob(job: TelegramJob, env: Env): Promise<vo
     return;
   }
   try {
-    await telegram.sendMessage(chatId, `✅ Facebook post:\n\n${result.content.facebookPost}`);
+    await telegram.sendMessage(chatId, `Facebook Post:\n${result.content.facebookPost}`, { label: "Copy FB Post", text: result.content.facebookPost });
+  } catch (error) {
+    logDeliveryFailure("send_post", error);
+    await sendErrorMessage("Your card was sent, but I couldn't send the Facebook post text. Please try again.");
+    return;
+  }
+  try {
+    await telegram.sendMessage(chatId, `Facebook Comment:\n${result.content.facebookComment}`, { label: "Copy Comment", text: result.content.facebookComment });
     console.log(JSON.stringify({ event: "telegram_copy_sent", requestId, telegramUserId, success: true }));
   } catch (error) {
-    logDeliveryFailure("send_copy", error);
-    await sendErrorMessage("Your card was sent, but I couldn't send the Facebook post text. Please try again.");
+    logDeliveryFailure("send_comment", error);
+    await sendErrorMessage("Your card and post were sent, but I couldn't send the Facebook comment. Please try again.");
   }
 }
