@@ -18,6 +18,16 @@ export const hostnameMatches = (hostname: string, domain: string): boolean => {
 const pathMatch = (url: URL, pattern: RegExp): string | undefined => url.pathname.match(pattern)?.[1];
 
 export const sovrnMerchantAdapters: Readonly<Record<SovrnStoreId, SovrnMerchantAdapter>> = {
+  walmart: {
+    store: "walmart", domains: ["walmart.com"], merchantNames: ["walmart", "walmart.com"],
+    productIdentity: url => pathMatch(url, /\/ip\/(?:[^/]+\/)?(\d+)(?:\/|$)/i),
+    productSignificantParams: ["selectedsellerid"]
+  },
+  elf: {
+    store: "elf", domains: ["elfcosmetics.com"], merchantNames: ["e.l.f.", "e.l.f. cosmetics", "elf cosmetics", "elfcosmetics.com"],
+    productIdentity: url => pathMatch(url, /\/products?\/([^/?#]+)/i),
+    productSignificantParams: ["variant", "shade", "color"]
+  },
   target: {
     store: "target", domains: ["target.com"], merchantNames: ["target", "target.com"],
     productIdentity: url => pathMatch(url, /\/A-(\d+)(?:\/|$)/i),

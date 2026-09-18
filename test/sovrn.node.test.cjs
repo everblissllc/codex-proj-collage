@@ -12,7 +12,7 @@ const { merchantMatchesStore, sovrnStoreForHostname } = req("stores/sovrn/mercha
 const { buildSovrnPlainlink } = req("stores/sovrn/plainlink.js");
 const { mapSovrnProduct, buildSovrnFacebookPost } = req("stores/sovrn/product-mapper.js");
 const { describeSovrnPriceResponse, describeSovrnResponse, inspectApprovedMerchants } = req("stores/sovrn/response-shape.js");
-const { inspectSovrnSourceIdentity } = req("stores/sovrn/source-identity-feasibility.js");
+const { assessSovrnPilotIdentity, inspectSovrnSourceIdentity } = req("stores/sovrn/source-identity-feasibility.js");
 const { WorkersAICopyProvider } = req("ai/workers-ai-provider.js");
 
 const config = { secretKey: "secret-value", siteApiKey: "site-value", market: "usd_en", campaignId: "123" };
@@ -30,7 +30,7 @@ const map = (offers, overrides = {}) => mapSovrnProduct({
 const expectCode = (fn, code) => assert.throws(fn, error => error instanceof ProductError && error.code === code);
 test("hosted feasibility workflow runs Node directly without Cloudflare Worker operations", () => {
   const workflow = readFileSync(path.join(process.cwd(), ".github/workflows/sovrn-feasibility-pilot.yml"), "utf8");
-  assert.match(workflow, /sovrn-direct-runner\.js/);
+  assert.match(workflow, /sovrn-walmart-elf-runner\.js/);
   assert.doesNotMatch(workflow, /wrangler|workers\.dev|secret bulk|workers\/scripts|CLOUDFLARE_|curl|--request/i);
 });
 
@@ -44,6 +44,13 @@ test("Sovrn candidate domains use exact/subdomain matching and reject lookalikes
     ["hellobubble.com", "bubble"], ["fakehellobubble.com", undefined]
   ];
   for (const [host, expected] of cases) assert.equal(sovrnStoreForHostname(host), expected, host);
+});
+
+test("official e.l.f. pilot adapter accepts only e.l.f. hosts and merchant aliases", () => {
+  assert.equal(sovrnStoreForHostname("www.elfcosmetics.com"), "elf");
+  assert.equal(sovrnStoreForHostname("fakeelfcosmetics.com"), undefined);
+  assert.equal(merchantMatchesStore("elf", { name: "e.l.f. Cosmetics" }), true);
+  assert.equal(merchantMatchesStore("elf", { name: "Ulta" }), false);
 });
 
 test("retailer plainlinks remove known tracking but preserve exact original and variant identity", () => {
@@ -183,7 +190,96 @@ test("direct pilot input requires and orders all six configured retailers", () =
   assert.throws(() => parseSovrnPilotCandidates(JSON.stringify({ ...configured, other: "https://example.com" })));
 });
 
-test("direct pilot summary requires strong identity and never substitutes another merchant", () => {
+test("direct pilot joins each lookup to current-run source evidence before summarizing usability", () => {
+  const runner = readFileSync(path.join(process.cwd(), "pilot/sovrn-direct-runner.ts"), "utf8");
+  assert.match(runner, /assessSovrnPilotIdentity\(result, sourceIdentities\.find\(source => source\.store === result\.store\)\)/);
+  assert.match(runner, /summarizeSovrnPilotLookup\(result, identityAssessment\)/);
+});
+
+const identityResult = (store, merchant, name, price = 10) => ({
+  store,
+  httpStatus: 200,
+  structure: describeSovrnPriceResponse([{
+    merchant: { name: merchant, id: 1 }, name, id: 2,
+    salePrice: price, retailPrice: price, currency: "USD", affiliatable: true,
+    image: "https://images.example.org/product.jpg",
+    deeplink: "https://credential-bearing.example/never-emit"
+  }])
+});
+
+const sourceIdentity = (store, name, variantEvidence, overrides = {}) => ({
+  store,
+  httpStatus: 200,
+  sourceProductId: "source-product",
+  sourceProductIdPresent: true,
+  variantQuery: {},
+  jsonLdProducts: [{ name }],
+  matchedVariations: [],
+  variantEvidence,
+  ...overrides
+});
+
+test("current-run Ulta and eCosmetics evidence produces no conflict and technical usability", () => {
+  const cases = [
+    {
+      result: identityResult("ulta", "Ulta", "e.l.f. Cosmetics Power Grip Primer", 11),
+      source: sourceIdentity("ulta", "Power Grip Primer", { explicit: true, size: "0.811 oz", sku: "2591795" })
+    },
+    {
+      result: identityResult("ecosmetics", "eCosmetics.com", "No. 7 Bonding Oil", 32),
+      source: sourceIdentity("ecosmetics", "No. 7 Bonding Oil", { explicit: true, size: "1 oz", variantId: "4815708", sku: "31042143" })
+    }
+  ];
+  for (const { result, source } of cases) {
+    const assessment = assessSovrnPilotIdentity(result, source);
+    const summary = summarizeSovrnPilotLookup(result, assessment);
+    assert.equal(assessment.variantClassification, "NO_VARIANT_CONFLICT");
+    assert.equal(assessment.productMatchConfirmed, true);
+    assert.equal(summary.technicalUsability, true);
+    assert.doesNotMatch(JSON.stringify({ assessment, summary }), /credential-bearing/);
+  }
+});
+
+test("current-run Target conflict and Nordstrom family ambiguity remain unusable", () => {
+  const target = identityResult("target", "Target", "CeraVe Hydrating Face Wash - 16 fl oz", 15.99);
+  const targetAssessment = assessSovrnPilotIdentity(
+    target,
+    sourceIdentity("target", "CeraVe Hydrating Face Wash", { explicit: true, multiVariantFamily: true, size: "3 fl oz" })
+  );
+  assert.equal(targetAssessment.variantClassification, "VARIANT_CONFLICT");
+  assert.equal(summarizeSovrnPilotLookup(target, targetAssessment).technicalUsability, false);
+
+  const nordstrom = identityResult("nordstrom", "Nordstrom", "Kiehl's Ultra Facial Cream in Jar, Size 8 Oz", 86.25);
+  const nordstromAssessment = assessSovrnPilotIdentity(
+    nordstrom,
+    sourceIdentity("nordstrom", "Kiehl's Ultra Facial Cream", { explicit: false, multiVariantFamily: true }, { sourceProductIdPresent: false })
+  );
+  assert.equal(nordstromAssessment.variantClassification, "VARIANT_AMBIGUOUS_HIGH_RISK");
+  assert.equal(summarizeSovrnPilotLookup(nordstrom, nordstromAssessment).technicalUsability, false);
+});
+
+test("current-run source failure fails closed while matching Sephora shade is exact", () => {
+  const result = identityResult("sephora", "Sephora", "Rare Beauty Soft Pinch Liquid Blush Adore 0.25 oz", 25);
+  const failed = sourceIdentity("sephora", "Rare Beauty Soft Pinch Liquid Blush", { explicit: true, shade: "Adore" }, {
+    httpStatus: undefined,
+    errorCode: "STORE_HTTP_ERROR"
+  });
+  const failedAssessment = assessSovrnPilotIdentity(result, failed);
+  assert.equal(failedAssessment.productMatchConfirmed, false);
+  assert.equal(summarizeSovrnPilotLookup(result, failedAssessment).technicalUsability, false);
+
+  const current = sourceIdentity("sephora", "Rare Beauty Soft Pinch Liquid Blush", {
+    explicit: true,
+    multiVariantFamily: true,
+    shade: "Adore"
+  });
+  const currentAssessment = assessSovrnPilotIdentity(result, current);
+  assert.equal(currentAssessment.variantClassification, "EXACT_VARIANT_MATCH");
+  assert.equal(currentAssessment.productMatchConfirmed, true);
+  assert.equal(summarizeSovrnPilotLookup(result, currentAssessment).technicalUsability, true);
+});
+
+test("direct pilot summary accepts exact-identity fallback and never substitutes another merchant", () => {
   const structure = describeSovrnPriceResponse([
     {
       merchant: { name: "Target", id: 390 }, name: "Exact Target Product", id: 10,
@@ -383,7 +479,49 @@ test("source identity inspection reports only canonical, JSON-LD, and matching e
   assert.deepEqual(summary.matchedVariations, [{
     variationId: "4411", sku: "OLAPLEX-1OZ", attributes: { attribute_pa_olaplex_size: "olaplex_1oz" }
   }]);
+  assert.deepEqual(summary.variantEvidence, {
+    explicit: true,
+    multiVariantFamily: false,
+    size: "1 oz",
+    shade: undefined,
+    variantId: "4411",
+    sku: "OLAPLEX-1OZ",
+    gtin: undefined
+  });
   assert.doesNotMatch(JSON.stringify(summary), /secret\.example/);
+});
+
+test("source inspection captures current Target and Ulta selected-size evidence", () => {
+  const targetHtml = `<html><head><meta property="og:title" content="CeraVe Hydrating Face Wash"></head><body>
+    <div data-product-id="81616326"><button aria-label="Size, 3 fl oz, selected">3 fl oz</button></div></body></html>`;
+  const target = inspectSovrnSourceIdentity({
+    store: "target",
+    sourceUrl: "https://www.target.com/p/item/-/A-81616326",
+    resolvedUrl: "https://www.target.com/p/item/-/A-81616326",
+    httpStatus: 200,
+    responseByteLength: targetHtml.length,
+    redirectCount: 0,
+    html: targetHtml
+  });
+  assert.equal(target.variantEvidence.size, "3 fl oz");
+  assert.equal(target.variantEvidence.explicit, true);
+
+  const ultaHtml = `<html><head>
+    <link rel="canonical" href="https://www.ulta.com/p/power-grip-primer-pimprod2030073?sku=2591795">
+    <script type="application/ld+json">{"@type":"Product","name":"Power Grip Primer","sku":"2591795","productID":"pimprod2030073"}</script>
+    </head><body><script>window.page={"dimensionsValue":"0.811 oz"}</script></body></html>`;
+  const ulta = inspectSovrnSourceIdentity({
+    store: "ulta",
+    sourceUrl: "https://www.ulta.com/p/power-grip-primer-pimprod2030073",
+    resolvedUrl: "https://www.ulta.com/p/power-grip-primer-pimprod2030073",
+    httpStatus: 200,
+    responseByteLength: ultaHtml.length,
+    redirectCount: 0,
+    html: ultaHtml
+  });
+  assert.equal(ulta.variantEvidence.size, "0.811 oz");
+  assert.equal(ulta.variantEvidence.sku, "2591795");
+  assert.equal(ulta.variantEvidence.explicit, true);
 });
 
 test("source identity inspection rejects a cross-retailer final hostname", () => {

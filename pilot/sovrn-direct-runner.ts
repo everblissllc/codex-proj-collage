@@ -6,7 +6,7 @@ import {
 } from "../src/stores/sovrn/feasibility";
 import { sovrnMerchantAdapters } from "../src/stores/sovrn/merchant-registry";
 import { inspectApprovedMerchants } from "../src/stores/sovrn/response-shape";
-import { fetchSovrnSourceIdentities } from "../src/stores/sovrn/source-identity-feasibility";
+import { assessSovrnPilotIdentity, fetchSovrnSourceIdentities } from "../src/stores/sovrn/source-identity-feasibility";
 import type { SovrnApprovedMerchantFinding } from "../src/stores/sovrn/types";
 
 const requiredKeys = [
@@ -67,12 +67,19 @@ async function main(): Promise<void> {
     compare: input => client.compareByPlainlinkDetailed(input)
   });
   const sourceIdentities = await fetchSovrnSourceIdentities(candidates);
+  const results = lookups.map(result => {
+    const identityAssessment = assessSovrnPilotIdentity(result, sourceIdentities.find(source => source.store === result.store));
+    return {
+      ...summarizeSovrnPilotLookup(result, identityAssessment),
+      identityAssessment
+    };
+  });
   console.log(JSON.stringify({
     event: "sovrn_direct_pilot_result",
     success: true,
     market: "usd_en",
     merchants,
-    results: lookups.map(result => summarizeSovrnPilotLookup(result)),
+    results,
     sourceIdentities
   }));
 }

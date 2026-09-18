@@ -12,9 +12,7 @@ jobs:
     env:
       SOVRN_SECRET_KEY: ${{ secrets.SOVRN_SECRET_KEY }}
       SOVRN_SITE_API_KEY: ${{ secrets.SOVRN_SITE_API_KEY }}
-      SOVRN_CAMPAIGN_ID: ${{ secrets.SOVRN_CAMPAIGN_ID }}
       SOVRN_MARKET: ${{ vars.SOVRN_MARKET }}
-      SOVRN_PILOT_PLAINLINKS_JSON: ${{ vars.SOVRN_PILOT_PLAINLINKS_JSON }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -27,7 +25,7 @@ jobs:
         run: |
           set -euo pipefail
           missing=()
-          for key in SOVRN_SECRET_KEY SOVRN_SITE_API_KEY SOVRN_CAMPAIGN_ID SOVRN_MARKET SOVRN_PILOT_PLAINLINKS_JSON; do
+          for key in SOVRN_SECRET_KEY SOVRN_SITE_API_KEY SOVRN_MARKET; do
             if [[ -z "${!key:-}" ]]; then missing+=("$key"); fi
           done
           if (( ${#missing[@]} > 0 )); then
@@ -43,11 +41,11 @@ jobs:
           git diff --check
           node scripts/check-smoke-config.mjs
           npx tsc --noEmit -p tsconfig.sovrn-direct-pilot.json
-      - name: Run direct sanitized Sovrn feasibility pilot
+      - name: Run direct sanitized Walmart and e.l.f. verification
         shell: bash
         run: |
           set -euo pipefail
           pilot_out="$RUNNER_TEMP/sovrn-direct-pilot"
           mkdir -p "$pilot_out"
           npx tsc -p tsconfig.sovrn-direct-pilot.json --noEmit false --outDir "$pilot_out"
-          node "$pilot_out/pilot/sovrn-direct-runner.js"
+          node "$pilot_out/pilot/sovrn-walmart-elf-runner.js"

@@ -100,7 +100,7 @@ export function parseSovrnPilotCandidates(value: string): SovrnPilotCandidate[] 
   const parsed: unknown = JSON.parse(value);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid candidates");
   const input = parsed as Record<string, unknown>;
-  if (Object.keys(input).length !== SOVRN_PILOT_STORES.length || Object.keys(input).some(store => !SOVRN_PILOT_STORES.includes(store as SovrnStoreId))) {
+  if (Object.keys(input).length !== SOVRN_PILOT_STORES.length || Object.keys(input).some(store => !(SOVRN_PILOT_STORES as readonly string[]).includes(store))) {
     throw new Error("invalid candidate stores");
   }
   return SOVRN_PILOT_STORES.map(store => {

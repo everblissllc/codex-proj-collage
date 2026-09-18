@@ -1,6 +1,7 @@
 import { readLimitedTextWithSize, resolveUrl } from "../resolve-url";
-import { hostnameMatches, sovrnMerchantAdapters } from "./merchant-registry";
-import type { SovrnPilotCandidate } from "./feasibility";
+import { classifySovrnVariantMatch, type SovrnPilotCandidate, type SovrnPilotLookupResult, type SovrnVariantClassification, type SovrnVariantEvidence } from "./feasibility";
+import { hostnameMatches, merchantMatchesStore, sovrnMerchantAdapters } from "./merchant-registry";
+import { extractElfProduct } from "../screenshot/elf";
 import type { SovrnStoreId } from "./types";
 
 export type SovrnSourceIdentityClassification =
@@ -33,7 +34,24 @@ export type SovrnSourceIdentitySummary = {
   pageTitle?: string;
   jsonLdProducts: SafeProductIdentity[];
   matchedVariations: Array<{ variationId?: string; sku?: string; attributes: Record<string, string> }>;
+  variantEvidence?: SovrnVariantEvidence;
+  existingProduct?: {
+    rawTitle: string;
+    currentPrice: { value: number; formatted: string; currency: string };
+    oldPrice?: { value: number; formatted: string; currency: string };
+    imagePresent: boolean;
+    imageHostname?: string;
+    postUrlPreserved: boolean;
+  };
+  existingProductError?: string;
   errorCode?: string;
+};
+
+export type SovrnPilotIdentityAssessment = {
+  productMatchConfirmed: boolean;
+  variantClassification: SovrnVariantClassification;
+  sourceVariantEvidence: SovrnVariantEvidence;
+  sovrnVariantEvidence: SovrnVariantEvidence;
 };
 
 const decodeHtml = (value: string): string => value
@@ -148,6 +166,108 @@ function matchedWooVariations(html: string, query: Record<string, string>): Sovr
   return output.slice(0, 10);
 }
 
+function sizeFromValue(value: string): string | undefined {
+  const normalized = value.replace(/[_-]+/g, " ");
+  const match = normalized.match(/(\d+(?:\.\d+)?)\s*(fl\s*oz|oz|ml)\b/i);
+  return match ? `${match[1]} ${match[2].replace(/\s+/g, " ")}` : undefined;
+}
+
+function sourceVariantEvidence(
+  store: SovrnStoreId,
+  html: string,
+  variantQuery: Record<string, string>,
+  products: readonly SafeProductIdentity[],
+  variations: SovrnSourceIdentitySummary["matchedVariations"]
+): SovrnVariantEvidence {
+  const selectedTargetSize = [...html.matchAll(/<[^>]+aria-label\s*=\s*(?:"([^"]+)"|'([^']+)')[^>]*>/gi)]
+    .map(match => decodeHtml(match[1] ?? match[2] ?? ""))
+    .map(label => label.match(/^Size,\s*(.+?),\s*selected$/i)?.[1])
+    .find((value): value is string => Boolean(value));
+  const structuredSize = html.match(/"dimensionsValue"\s*:\s*"([^"]+)"/i)?.[1]
+    ?? html.match(/"product_size"\s*:\s*\[\s*"([^"]+)"/i)?.[1];
+  const querySize = Object.entries(variantQuery).find(([key]) => /(?:^size$|attribute_pa_.*size)/i.test(key))?.[1];
+  const variation = variations.length === 1 ? variations[0] : undefined;
+  const size = selectedTargetSize ?? structuredSize ?? (querySize ? sizeFromValue(querySize) : undefined) ?? products.find(product => product.size)?.size;
+  const shade = variantQuery.shade ?? variantQuery.color ?? products.find(product => product.color)?.color;
+  const sku = variation?.sku ?? variantQuery.sku ?? products.find(product => product.sku)?.sku;
+  const variantId = variation?.variationId ?? variantQuery.variant ?? variantQuery.skuid;
+  const explicit = Boolean(size || shade || variantId);
+  const variantSignals = /(?:shade|swatch|variation|variant-selector|product-options)/i.test(html);
+  return {
+    explicit,
+    multiVariantFamily: !explicit && (store === "nordstrom" || variantSignals),
+    size,
+    shade,
+    variantId,
+    sku,
+    gtin: products.find(product => product.gtin)?.gtin
+  };
+}
+
+function sizeFromOfferName(name?: string): string | undefined {
+  if (!name) return undefined;
+  const matches = [...name.matchAll(/\b(\d+(?:\.\d+)?)\s*(fl\.?\s*oz\.?|oz\.?|ml)\b/gi)];
+  const match = matches.at(-1);
+  return match ? `${match[1]} ${match[2].replace(/\./g, "").replace(/\s+/g, " ")}` : undefined;
+}
+
+const normalizedProductName = (value: string): string => value.toLowerCase()
+  .replace(/&(?:#8211|ndash|mdash);/g, " ")
+  .replace(/[^a-z0-9]+/g, " ")
+  .trim();
+
+function sameProduct(source: SovrnSourceIdentitySummary, offerName?: string): boolean {
+  if (!source.sourceProductIdPresent || !offerName) return false;
+  const offer = normalizedProductName(offerName);
+  const names = source.jsonLdProducts.map(product => product.name).filter((value): value is string => Boolean(value));
+  if (!names.length && source.pageTitle) names.push(source.pageTitle.split(/\s+[|–—]\s+/)[0]);
+  return names.some(name => {
+    const normalized = normalizedProductName(name);
+    return normalized.length >= 8 && (offer.includes(normalized) || normalized.includes(offer));
+  });
+}
+
+export function assessSovrnPilotIdentity(
+  result: SovrnPilotLookupResult,
+  source: SovrnSourceIdentitySummary | undefined
+): SovrnPilotIdentityAssessment {
+  const unavailable: SovrnPilotIdentityAssessment = {
+    productMatchConfirmed: false,
+    variantClassification: "NO_VARIANT_CONFLICT",
+    sourceVariantEvidence: { explicit: false },
+    sovrnVariantEvidence: { explicit: false }
+  };
+  if (!source || source.store !== result.store || source.errorCode || !source.httpStatus || source.httpStatus < 200 || source.httpStatus >= 300) {
+    return unavailable;
+  }
+  const sameRetailerOffers = result.structure?.offers.filter(offer => merchantMatchesStore(result.store, { name: offer.merchant.name })) ?? [];
+  if (sameRetailerOffers.length !== 1) return { ...unavailable, sourceVariantEvidence: source.variantEvidence ?? { explicit: false } };
+  const offer = sameRetailerOffers[0];
+  const sourceEvidence = source.variantEvidence ?? { explicit: false };
+  const size = sizeFromOfferName(offer.name);
+  const matchingShade = sourceEvidence.shade && offer.name && normalizedProductName(offer.name).includes(normalizedProductName(sourceEvidence.shade))
+    ? sourceEvidence.shade
+    : undefined;
+  const offerName = offer.name ? normalizedProductName(offer.name) : "";
+  const sourceName = source.jsonLdProducts.map(product => product.name).filter((value): value is string => Boolean(value))
+    .map(normalizedProductName).sort((left, right) => right.length - left.length).find(name => offerName.includes(name));
+  const variantSuffix = sourceEvidence.multiVariantFamily && sourceName
+    ? offerName.split(sourceName, 2)[1]?.replace(/\b\d+(?:\.\d+)?\s*(?:fl\s*)?oz\b|\b\d+(?:\.\d+)?\s*ml\b|\bin\s+jar\b/g, " ").trim()
+    : undefined;
+  const offerEvidence: SovrnVariantEvidence = {
+    explicit: Boolean(size || matchingShade || variantSuffix),
+    size,
+    shade: matchingShade ?? variantSuffix,
+    container: offer.name && /\bin\s+jar\b/i.test(offer.name) ? "jar" : undefined
+  };
+  return {
+    productMatchConfirmed: sameProduct(source, offer.name),
+    variantClassification: classifySovrnVariantMatch(sourceEvidence, offerEvidence),
+    sourceVariantEvidence: sourceEvidence,
+    sovrnVariantEvidence: offerEvidence
+  };
+}
+
 export function inspectSovrnSourceIdentity(input: {
   store: SovrnStoreId;
   sourceUrl: string;
@@ -163,6 +283,30 @@ export function inspectSovrnSourceIdentity(input: {
   const adapter = sovrnMerchantAdapters[input.store];
   if (!adapter.domains.some(domain => hostnameMatches(resolved.hostname, domain))) throw new Error("SOURCE_HOST_MISMATCH");
   const sourceProductId = adapter.productIdentity(source);
+  const variantQuery = selectedQuery(source, adapter.productSignificantParams);
+  const products = jsonLdProducts(input.html);
+  const variations = matchedWooVariations(input.html, variantQuery);
+  let existingProduct: SovrnSourceIdentitySummary["existingProduct"];
+  let existingProductError: string | undefined;
+  if (input.store === "elf") {
+    try {
+      const product = extractElfProduct(input.html, input.sourceUrl, input.resolvedUrl);
+      let imageHostname: string | undefined;
+      try { imageHostname = new URL(product.imageUrl).hostname; } catch { /* Extractor already validates this URL. */ }
+      existingProduct = {
+        rawTitle: product.rawTitle,
+        currentPrice: product.currentPrice,
+        oldPrice: product.oldPrice,
+        imagePresent: Boolean(product.imageUrl),
+        imageHostname,
+        postUrlPreserved: product.postUrl === input.sourceUrl
+      };
+    } catch (error) {
+      existingProductError = error && typeof error === "object" && "code" in error && typeof error.code === "string"
+        ? error.code
+        : "ELF_EXTRACTION_FAILED";
+    }
+  }
   return {
     store: input.store,
     httpStatus: input.httpStatus,
@@ -172,11 +316,14 @@ export function inspectSovrnSourceIdentity(input: {
     redirectCount: input.redirectCount,
     sourceProductId,
     sourceProductIdPresent: Boolean(sourceProductId && input.html.toLowerCase().includes(sourceProductId.toLowerCase())),
-    variantQuery: selectedQuery(source, adapter.productSignificantParams),
+    variantQuery,
     canonical: canonicalSummary(input.html, resolved, adapter.productSignificantParams),
     pageTitle: title(input.html),
-    jsonLdProducts: jsonLdProducts(input.html),
-    matchedVariations: matchedWooVariations(input.html, selectedQuery(source, adapter.productSignificantParams))
+    jsonLdProducts: products,
+    matchedVariations: variations,
+    variantEvidence: sourceVariantEvidence(input.store, input.html, variantQuery, products, variations),
+    existingProduct,
+    existingProductError
   };
 }
 
