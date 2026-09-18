@@ -40,7 +40,8 @@ jobs:
               "browser_render_attempt_failed", "browser_render_complete", "browser_render_failed",
               "card_cache_stored", "process_complete", "process_failed",
               "job_processing_failed", "telegram_photo_sent", "telegram_copy_sent",
-              "telegram_delivery_failed", "telegram_error_message_failed"
+              "telegram_photo_prepared", "telegram_delivery_failed", "telegram_error_message_failed",
+              "amazon_source_identity"
             ]);
             const fields = [
               "requestId", "store", "hostname", "cacheStatus", "reason", "errorCode",
@@ -50,6 +51,17 @@ jobs:
               "browserDurationMs", "totalDurationMs", "success", "operation",
               "httpStatus", "telegramErrorCode", "telegramDescriptionCategory"
             ];
+            const safeTelegramDescription = (value) => {
+              if (typeof value !== "string") return undefined;
+              const text = value.trim();
+              if (!text || [...text].length > 200 || /[\r\n\u0000-\u001f\u007f]/.test(text)) return undefined;
+              if (/https?:\/\/|bot\d{6,}:[A-Za-z0-9_-]{20,}|\b\d{8,}\b/i.test(text)) return undefined;
+              return /^[\x20-\x7e]+$/.test(text) ? text : undefined;
+            };
+            const safeAmazonHostname = (value) =>
+              typeof value === "string" && /^(?:[a-z0-9-]+\.)*amazon\.com$/i.test(value) ? value.toLowerCase() : undefined;
+            const safeAmazonIdentityStatus = (value) =>
+              ["SOURCE_CONFIRMED", "SOURCE_CONFLICT", "SOURCE_UNCONFIRMED"].includes(value) ? value : undefined;
             const asObject = (value) => {
               if (typeof value === "string") {
                 try { value = JSON.parse(value); } catch { return null; }
@@ -59,6 +71,52 @@ jobs:
             const emit = (value) => {
               const entry = asObject(value);
               if (!entry || !allowed.has(entry.event)) return false;
+              if (entry.event === "telegram_photo_prepared") {
+                const safe = { event: entry.event };
+                for (const field of ["width", "height", "byteSize"]) {
+                  if (Number.isInteger(entry[field]) && entry[field] >= 0) safe[field] = entry[field];
+                }
+                if (typeof entry.validPng === "boolean") safe.pngSignatureValid = entry.validPng;
+                if (typeof entry.telegramPhotoLimitsValid === "boolean") safe.telegramDimensionsValid = entry.telegramPhotoLimitsValid;
+                if (typeof entry.mimeType === "string" && /^image\/(?:png|jpeg|webp)$/.test(entry.mimeType)) safe.mimeType = entry.mimeType;
+                process.stdout.write(JSON.stringify(safe) + "\n");
+                return true;
+              }
+              if (["telegram_delivery_failed", "telegram_error_message_failed"].includes(entry.event)) {
+                const safe = { event: entry.event };
+                if (Number.isInteger(entry.httpStatus) && entry.httpStatus >= 100 && entry.httpStatus <= 599) safe.httpStatus = entry.httpStatus;
+                if (typeof entry.telegramDescriptionCategory === "string" && /^[A-Z_]{1,40}$/.test(entry.telegramDescriptionCategory)) {
+                  safe.category = entry.telegramDescriptionCategory;
+                }
+                const description = safeTelegramDescription(entry.telegramDescription);
+                if (description) safe.telegramDescription = description;
+                process.stdout.write(JSON.stringify(safe) + "\n");
+                return true;
+              }
+              if (entry.event === "amazon_source_identity") {
+                const safe = { event: entry.event };
+                const finalHostname = safeAmazonHostname(entry.hostname);
+                if (finalHostname) safe.finalHostname = finalHostname;
+                const source = entry.sourceIdentitySource;
+                const supported = source === "resolved-product-route";
+                const canonical = source === "canonical";
+                const jsonLd = source === "json-ld";
+                const addToCart = source === "add-to-cart";
+                safe.supportedRouteIdentityPresent = supported;
+                safe.canonicalIdentityPresent = canonical;
+                safe.jsonLdIdentityPresent = jsonLd;
+                safe.addToCartIdentityPresent = addToCart;
+                if (supported) safe.finalRouteCategory = "SUPPORTED_PRODUCT_ROUTE";
+                else if (canonical || jsonLd || addToCart) {
+                  safe.finalRouteCategory = "OTHER_AMAZON_ROUTE";
+                  safe.pageReadSucceeded = true;
+                }
+                const identityStatus = safeAmazonIdentityStatus(entry.sourceIdentityState);
+                if (identityStatus) safe.identityStatus = identityStatus;
+                if (typeof entry.errorCode === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(entry.errorCode)) safe.errorCode = entry.errorCode;
+                process.stdout.write(JSON.stringify(safe) + "\n");
+                return true;
+              }
               const safe = { event: entry.event };
               for (const field of fields) {
                 const value = entry[field];
