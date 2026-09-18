@@ -1,13 +1,13 @@
 import { ProductError, type GeneratedContent, type ProductData } from "../types";
 import { detectStore } from "../stores/detect-store";
 import { resolveUrl, readLimitedTextWithSize } from "../stores/resolve-url";
-import { validatePublicUrl, type DnsCheck } from "../stores/safe-url";
+import { assertPublicDns, validatePublicUrl, type DnsCheck } from "../stores/safe-url";
 import { extractWalmartProduct } from "../stores/walmart/extractor";
 import { inspectWalmartHtml, walmartProductId } from "../stores/walmart/diagnostics";
 import { generateProductCopy } from "../ai/generate-product-copy";
 import { buildFacebookComment, buildFacebookPost } from "../ai/build-facebook-post";
 import type { CopyProvider } from "../ai/provider";
-import { renderCard } from "../rendering/render-card";
+import { fetchImageAsDataUrl, renderCard } from "../rendering/render-card";
 import type { CardImage, ScreenshotRenderer } from "../rendering/types";
 import type { FetchLike } from "../network/worker-fetch";
 import { productStateCacheKey, usableWalmartProductId } from "../cache/cache-key";
@@ -18,8 +18,10 @@ import type { MobilePageScreenshotRenderer } from "../rendering/mobile-page-rend
 import { amazonAsinFromUrl } from "../stores/amazon/diagnostics";
 import { resolveAmazonIdentity } from "../stores/amazon/identity";
 import type { AmazonProductProvider } from "../stores/amazon/creators-api-product";
+import type { SovrnProductProvider } from "../stores/sovrn/types";
+import { enrichWalmartWithSovrn } from "../stores/sovrn/walmart-integration";
 
-export type ProcessDeps = { fetcher: FetchLike; copyProvider: CopyProvider; renderer: ScreenshotRenderer; pageRenderer?: MobilePageScreenshotRenderer; amazonProductProvider?: AmazonProductProvider; disclosure: string; requestId: string; telegramUserId?: number; dnsCheck?: DnsCheck; cardCache?: CardCache };
+export type ProcessDeps = { fetcher: FetchLike; copyProvider: CopyProvider; renderer: ScreenshotRenderer; pageRenderer?: MobilePageScreenshotRenderer; amazonProductProvider?: AmazonProductProvider; sovrnProductProvider?: SovrnProductProvider; disclosure: string; requestId: string; telegramUserId?: number; dnsCheck?: DnsCheck; cardCache?: CardCache };
 export type ProcessResult = { product: ProductData; content: GeneratedContent; card: CardImage };
 
 type CacheDecision = { kind: "hit"; result: Extract<CacheLookup, { kind: "hit" }> } | { kind: "claimed"; token: string } | { kind: "bypass" };
@@ -135,7 +137,16 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
         httpStatus: page.response.status, contentType, responseByteLength, htmlLength: html.length,
         hostname, redirectCount: page.redirectCount, ...diagnostics
       }));
-      product = extractWalmartProduct(html, inputUrl, page.resolvedUrl);
+      const walmartProduct = extractWalmartProduct(html, inputUrl, page.resolvedUrl);
+      const sovrnDecision = await enrichWalmartWithSovrn({
+        sourceProduct: walmartProduct,
+        sourceHtml: html,
+        requestId: deps.requestId,
+        provider: deps.sovrnProductProvider,
+        validateImage: async url => { await fetchImageAsDataUrl(url, deps.fetcher, deps.dnsCheck ?? assertPublicDns, deps.requestId); }
+      });
+      console.log(JSON.stringify({ ...base, ...sovrnDecision.telemetry }));
+      product = sovrnDecision.product;
       canonicalProductId = [diagnostics.canonicalProductId, walmartProductId(product.canonicalProductUrl ?? product.resolvedUrl)].find(usableWalmartProductId);
     } else {
       let identityHtml: string | undefined;

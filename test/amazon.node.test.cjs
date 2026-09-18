@@ -508,6 +508,7 @@ test("Amazon Creators orchestration preserves exact affiliate URL, isolates AI, 
   const seen = [];
   let renders = 0;
   let cacheCalls = 0;
+  let sovrnCalls = 0;
   const image = new Uint8Array([255, 216, 255, 217]);
   const responses = [new Response("resolution only", { headers: { "content-type": "text/html" } }), new Response(image, { headers: { "content-type": "image/jpeg" } })];
   const result = await processProductLink(affiliate, {
@@ -524,11 +525,13 @@ test("Amazon Creators orchestration preserves exact affiliate URL, isolates AI, 
       savingBasis: { money: { amount: 39.99, currency: "USD", displayAmount: "$39.99" }, savingBasisType: "LIST_PRICE" },
       savings: { money: { amount: 15, currency: "USD", displayAmount: "$15.00" }, percentage: 38 }
     } })] } })),
+    sovrnProductProvider: { product: async () => { sovrnCalls++; throw new Error("Amazon must never invoke Sovrn"); } },
     cardCache: { lookup: async () => { cacheCalls++; throw Error("must not read"); }, claim: async () => { cacheCalls++; return null; }, store: async () => { cacheCalls++; }, release: async () => { cacheCalls++; } },
     disclosure: "#Ad", requestId: "amazon-process"
   });
   assert.equal(renders, 1);
   assert.equal(cacheCalls, 0);
+  assert.equal(sovrnCalls, 0);
   assert.equal(result.product.postUrl, affiliate);
   assert.match(result.content.facebookPost, /\$24\.99/);
   assert.doesNotMatch(result.content.facebookPost, /#Ad|\$39\.99|38%|list price|https?:\/\//i);

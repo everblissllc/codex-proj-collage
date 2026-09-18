@@ -67,6 +67,9 @@ jobs:
       AMAZON_CREATORS_CREDENTIAL_VERSION: ${{ vars.AMAZON_CREATORS_CREDENTIAL_VERSION }}
       AMAZON_CREATORS_MARKETPLACE: ${{ vars.AMAZON_CREATORS_MARKETPLACE }}
       AMAZON_CREATORS_PARTNER_TAG: ${{ vars.AMAZON_CREATORS_PARTNER_TAG }}
+      SOVRN_SECRET_KEY: ${{ secrets.SOVRN_SECRET_KEY }}
+      SOVRN_SITE_API_KEY: ${{ secrets.SOVRN_SITE_API_KEY }}
+      SOVRN_MARKET: ${{ vars.SOVRN_MARKET }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -84,7 +87,7 @@ jobs:
             console.log(`Branch: ${process.env.GITHUB_REF_NAME}`);
             console.log(`Commit: ${process.env.GITHUB_SHA}`);
           '
-      - name: Validate and provision Amazon runtime bindings
+      - name: Validate and provision provider runtime bindings
         shell: bash
         run: |
           set -euo pipefail
@@ -96,7 +99,20 @@ jobs:
             printf 'Missing production Amazon binding: %s\n' "${missing[@]}" >&2
             exit 2
           fi
-          secrets_file="$RUNNER_TEMP/production-amazon-bindings.json"
+          sovrn_missing=()
+          for key in SOVRN_SECRET_KEY SOVRN_SITE_API_KEY SOVRN_MARKET; do
+            if [[ -z "${!key:-}" ]]; then sovrn_missing+=("$key"); fi
+          done
+          if (( ${#sovrn_missing[@]} == 0 )); then
+            if [[ "$SOVRN_MARKET" != "usd_en" ]]; then
+              echo "Production SOVRN_MARKET must be usd_en." >&2
+              exit 2
+            fi
+            export SOVRN_CONFIGURED=1
+          else
+            printf 'Optional Sovrn binding absent; Walmart fallback remains active: %s\n' "${sovrn_missing[@]}"
+          fi
+          secrets_file="$RUNNER_TEMP/production-provider-bindings.json"
           trap 'rm -f "$secrets_file"' EXIT
           node -e '
             const { writeFileSync } = require("node:fs");
@@ -105,6 +121,7 @@ jobs:
               "AMAZON_CREATORS_CREDENTIAL_VERSION", "AMAZON_CREATORS_MARKETPLACE",
               "AMAZON_CREATORS_PARTNER_TAG"
             ];
+            if (process.env.SOVRN_CONFIGURED === "1") names.push("SOVRN_SECRET_KEY", "SOVRN_SITE_API_KEY", "SOVRN_MARKET");
             writeFileSync(process.argv[1], JSON.stringify(Object.fromEntries(names.map(name => [name, process.env[name]]))), { mode: 0o600 });
           ' "$secrets_file"
           npx wrangler secret bulk "$secrets_file" --name affiliate-deal-card-bot --config wrangler.jsonc

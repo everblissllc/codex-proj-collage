@@ -10,7 +10,7 @@ import { workerFetch, type FetchLike } from "../network/worker-fetch";
 
 type EmbeddedImage = { dataUrl: string; mimeType: string; byteLength: number };
 
-async function fetchImageAsDataUrl(url: string, fetcher: FetchLike, dnsCheck: DnsCheck, requestId?: string): Promise<EmbeddedImage> {
+export async function fetchImageAsDataUrl(url: string, fetcher: FetchLike, dnsCheck: DnsCheck, requestId?: string): Promise<EmbeddedImage> {
   validatePublicUrl(url);
   const { response, resolvedUrl } = await resolveUrl(url, fetcher, "image/webp,image/png,image/jpeg", dnsCheck);
   if (!response.ok || response.status >= 300) throw new ProductError("IMAGE_FETCH_FAILED", "render", `Image returned HTTP ${response.status}`);

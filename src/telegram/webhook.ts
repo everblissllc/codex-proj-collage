@@ -10,6 +10,9 @@ import { D1R2CardCache, cardCacheTtlSeconds } from "../cache/card-cache";
 import { AmazonCreatorsTokenManager, type CreatorsCredentialVersion } from "../stores/amazon/creators-token-manager";
 import { AmazonCreatorsApiClient } from "../stores/amazon/creators-api-client";
 import { CreatorsAmazonProductProvider, type AmazonProductProvider } from "../stores/amazon/creators-api-product";
+import { SovrnClient } from "../stores/sovrn/client";
+import { PriceComparisonSovrnProductProvider } from "../stores/sovrn/product-provider";
+import type { SovrnMarket, SovrnProductProvider } from "../stores/sovrn/types";
 
 export type Env = {
   TELEGRAM_BOT_TOKEN: string;
@@ -27,6 +30,9 @@ export type Env = {
   AMAZON_CREATORS_CREDENTIAL_VERSION?: string;
   AMAZON_CREATORS_MARKETPLACE?: string;
   AMAZON_CREATORS_PARTNER_TAG?: string;
+  SOVRN_SECRET_KEY?: string;
+  SOVRN_SITE_API_KEY?: string;
+  SOVRN_MARKET?: string;
 };
 type TelegramUpdate = { message?: { text?: string; caption?: string; entities?: UrlEntity[]; caption_entities?: UrlEntity[]; chat?: { id?: number }; from?: { id?: number } } };
 export type TelegramJob = { chatId: number; telegramUserId?: number; inputUrl: string; requestId: string };
@@ -50,6 +56,24 @@ function amazonProductProvider(env: Env): AmazonProductProvider | undefined {
   const client = new AmazonCreatorsApiClient(tokens, { marketplace: env.AMAZON_CREATORS_MARKETPLACE, partnerTag: env.AMAZON_CREATORS_PARTNER_TAG }, workerFetch);
   const provider = new CreatorsAmazonProductProvider(client);
   amazonRuntime = { clientId: env.AMAZON_CREATORS_CLIENT_ID, clientSecret: env.AMAZON_CREATORS_CLIENT_SECRET, credentialVersion, marketplace: env.AMAZON_CREATORS_MARKETPLACE, partnerTag: env.AMAZON_CREATORS_PARTNER_TAG, provider };
+  return provider;
+}
+
+let sovrnRuntime: {
+  secretKey: string;
+  siteApiKey: string;
+  market: SovrnMarket;
+  provider: SovrnProductProvider;
+} | undefined;
+
+function walmartSovrnProductProvider(env: Env): SovrnProductProvider | undefined {
+  if (!env.SOVRN_SECRET_KEY || !env.SOVRN_SITE_API_KEY || env.SOVRN_MARKET !== "usd_en") return undefined;
+  if (sovrnRuntime && sovrnRuntime.secretKey === env.SOVRN_SECRET_KEY && sovrnRuntime.siteApiKey === env.SOVRN_SITE_API_KEY && sovrnRuntime.market === env.SOVRN_MARKET) {
+    return sovrnRuntime.provider;
+  }
+  const market = env.SOVRN_MARKET as SovrnMarket;
+  const provider = new PriceComparisonSovrnProductProvider(new SovrnClient({ secretKey: env.SOVRN_SECRET_KEY, siteApiKey: env.SOVRN_SITE_API_KEY, market }, workerFetch));
+  sovrnRuntime = { secretKey: env.SOVRN_SECRET_KEY, siteApiKey: env.SOVRN_SITE_API_KEY, market, provider };
   return provider;
 }
 
@@ -138,6 +162,7 @@ export async function processTelegramJob(job: TelegramJob, env: Env): Promise<vo
       renderer: new BrowserScreenshotRenderer(env.BROWSER),
       pageRenderer: new BrowserMobilePageRenderer(env.BROWSER),
       amazonProductProvider: amazonProductProvider(env),
+      sovrnProductProvider: walmartSovrnProductProvider(env),
       disclosure: env.AFFILIATE_DISCLOSURE || "#Ad",
       requestId,
       telegramUserId,
