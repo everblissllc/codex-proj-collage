@@ -14,22 +14,39 @@ function substitute(template: string, product: ProductData, shortTitle: string):
     .replaceAll("{{RETAILER}}", RETAILERS[product.store]);
 }
 
-function safeFacebookPost(value: string, product: ProductData): boolean {
+export function validFacebookHookTemplate(value: string, rawTitle?: string): boolean {
+  if (!value || value.length > 220 || /https?:\/\/|www\.|#ad\b/i.test(value)) return false;
+  if (/\d/.test(value)) return false;
+  if (/\b(?:coupon|clearance|sale|off|discount|markdown|price drop|lowest price|sold out|few left|save|savings)\b/i.test(value)) return false;
+  const withoutAllowed = value.replace(/{{(?:PRICE|SHORT_TITLE|RETAILER)}}/g, "");
+  if (/{{|}}/.test(withoutAllowed)) return false;
+  if (rawTitle === undefined) return true;
+  const ageTerms = value.match(/\b(?:baby|babies|kid|kids|toddler|toddlers|child|children)\b/gi) ?? [];
+  const source = rawTitle.toLowerCase();
+  if (!ageTerms.every(term => source.includes(term.toLowerCase()))) return false;
+  if (/\blittle ones?\b/i.test(value) && !/\b(?:baby|babies|kid|kids|toddler|toddlers|child|children|toy|toys)\b/i.test(source)) return false;
+  return true;
+}
+
+function safeFacebookPost(value: string, product: ProductData, shortTitle: string): boolean {
   if (!value || value.length > 256 || /#ad\b|https?:\/\/|www\./i.test(value) || /{{|}}/.test(value)) return false;
-  if (!value.includes(product.currentPrice.formatted)) return false;
   if (product.oldPrice?.formatted && product.oldPrice.formatted !== product.currentPrice.formatted && value.includes(product.oldPrice.formatted)) return false;
   if (product.amazon?.savings?.percentage !== undefined && value.includes(`${product.amazon.savings.percentage}%`)) return false;
   if (product.amazon?.asin && value.toUpperCase().includes(product.amazon.asin.toUpperCase())) return false;
   if (/\b(?:coupon|clearance|sale|list price|was|off|discount|markdown|price drop|lowest price|sold out|few left|save|savings)\b|\d+\s*%\s*off\b/i.test(value)) return false;
-  const withoutTrustedPrice = value.replace(product.currentPrice.formatted, "");
-  return !/\$\s*\d|\b\d+(?:\.\d{1,2})?\s*(?:usd|cad|eur|gbp)\b/i.test(withoutTrustedPrice);
+  const withoutTrustedValues = value
+    .replaceAll(product.currentPrice.formatted, "")
+    .replaceAll(shortTitle, "")
+    .replaceAll(RETAILERS[product.store], "");
+  return !/\d|\$|\b(?:usd|cad|eur|gbp)\b/i.test(withoutTrustedValues);
 }
 
 export function buildFacebookPost(product: ProductData, shortTitle: string, hookTemplate?: string): string {
-  for (const template of [hookTemplate, FALLBACK_WITH_TITLE, FALLBACK_GENERIC]) {
+  const safeHook = hookTemplate && validFacebookHookTemplate(hookTemplate, product.rawTitle) ? hookTemplate : undefined;
+  for (const template of [safeHook, FALLBACK_WITH_TITLE, FALLBACK_GENERIC]) {
     if (!template) continue;
     const post = substitute(template, product, shortTitle);
-    if (safeFacebookPost(post, product)) return post;
+    if (safeFacebookPost(post, product, shortTitle)) return post;
   }
   throw new Error("Unable to build safe Facebook post");
 }

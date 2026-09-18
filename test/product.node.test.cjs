@@ -9,9 +9,9 @@ const { resolveUrl } = src("stores/resolve-url.js");
 const { extractWalmartProduct } = src("stores/walmart/extractor.js");
 const { inspectWalmartHtml } = src("stores/walmart/diagnostics.js");
 const { normalizePrice } = src("stores/walmart/price.js");
-const { parseCopyDraft, parseWorkersAIResponse, validFacebookHookTemplate, WorkersAICopyProvider } = src("ai/workers-ai-provider.js");
+const { parseCopyDraft, parseWorkersAIResponse, WorkersAICopyProvider } = src("ai/workers-ai-provider.js");
 const { generateProductCopy } = src("ai/generate-product-copy.js");
-const { buildFacebookComment } = src("ai/build-facebook-post.js");
+const { buildFacebookComment, buildFacebookPost, validFacebookHookTemplate } = src("ai/build-facebook-post.js");
 const { walmartCardHtml } = src("stores/walmart/template.js");
 const { BrowserScreenshotRenderer, browserRateLimitDelayMs } = src("rendering/browser-renderer.js");
 const { processProductLink } = src("orchestration/process-product-link.js");
@@ -212,6 +212,11 @@ test("Workers AI provider makes one URL-free text inference and accepts fenced J
     assert.ok(!JSON.stringify(options).includes(p.currentPrice.formatted));
     assert.ok(!JSON.stringify(options).includes(p.oldPrice.formatted));
     assert.equal(options.messages.length, 2);
+    assert.equal(options.temperature, 0.4);
+    assert.match(options.messages[0].content, /Vary the opening, sentence structure, capitalization, emoji choice/);
+    assert.match(options.messages[0].content, /any useful subset of \{\{PRICE\}\}, \{\{SHORT_TITLE\}\}, and \{\{RETAILER\}\}/);
+    assert.match(options.messages[0].content, /preserve.*identifying digits from the raw title/i);
+    assert.match(options.messages[0].content, /facebookHookTemplate must never contain a literal digit/i);
     return { response: '```json\n{"shortTitle":"Disney Toniebox Starter Set","facebookHookTemplate":"okayyy {{SHORT_TITLE}} for {{PRICE}}?! 👀🔥\\nLink in Comment !! 🔗⬇️"}\n```' };
   } }, "@cf/meta/llama-3.2-3b-instruct");
   const draft = await provider.generate(p.rawTitle);
@@ -255,6 +260,53 @@ test("trusted numeric product names survive placeholder substitution without per
     assert.ok(copy.facebookPost.includes(p.currentPrice.formatted));
   }
   assert.equal(validFacebookHookTemplate("only 29.99 for {{SHORT_TITLE}} at {{PRICE}}"), false);
+});
+test("AI hooks support varied structures and optional controlled placeholders", () => {
+  const p = extractWalmartProduct(withWas, input, walmart);
+  const examples = [
+    ["waittt why is this only {{PRICE}} 😭💕\ncheck the comment 🔗⬇️", "Disney Toniebox Starter Set"],
+    ["okayyy {{RETAILER}} 😭 this one is {{PRICE}}!! 🔥", "Disney Toniebox Starter Set"],
+    ["{{SHORT_TITLE}} for {{PRICE}}?! okay i’m listening 👀😂", "Disney Toniebox Starter Set"],
+    ["this is actually such a cute find 😭💛 {{PRICE}}!!\nsee the comment 👇", "Disney Toniebox Starter Set"],
+    ["i need this 😂💕\nlink is in the comments 👇", "Disney Toniebox Starter Set"],
+    ["omggg {{PRICE}}?! the little ones would love this 😂💕", "Disney Toniebox Toddler Audio Starter Set"]
+  ];
+  const posts = examples.map(([hook, rawTitle]) => {
+    assert.equal(validFacebookHookTemplate(hook, rawTitle), true);
+    return buildFacebookPost({ ...p, rawTitle }, "Disney Toniebox Starter Set", hook);
+  });
+  assert.ok(posts[0].startsWith(`waittt why is this only ${p.currentPrice.formatted}`));
+  assert.ok(posts[1].includes(`Walmart 😭 this one is ${p.currentPrice.formatted}`));
+  assert.ok(posts[2].startsWith(`Disney Toniebox Starter Set for ${p.currentPrice.formatted}`));
+  assert.ok(posts[3].includes(`${p.currentPrice.formatted}!!`));
+  assert.equal(posts[4], "i need this 😂💕\nlink is in the comments 👇");
+  assert.ok(posts[5].includes("little ones"));
+  assert.equal(new Set(posts).size, examples.length);
+  assert.equal(validFacebookHookTemplate("this toddler find is too cute 💕", "Phone Case"), false);
+  assert.equal(validFacebookHookTemplate("the little ones would love this 😂💕", "Phone Case"), false);
+});
+test("trusted values are inserted only by the shared application builder for every normalized retailer", () => {
+  const base = extractWalmartProduct(withWas, input, walmart);
+  const hook = "{{RETAILER}} really said take my money 😂 {{PRICE}}\nsee the comment 👀👇";
+  for (const [store, retailer] of [["walmart", "Walmart"], ["amazon", "Amazon"], ["elf", "e.l.f."]]) {
+    const product = { ...base, store, rawTitle: "Everyday Product", postUrl: `https://tracker.example/${store}` };
+    const post = buildFacebookPost(product, "Everyday Product", hook);
+    assert.equal(post, `${retailer} really said take my money 😂 ${base.currentPrice.formatted}\nsee the comment 👀👇`);
+    assert.ok(!post.includes(product.postUrl));
+    assert.equal(buildFacebookComment(product), `#Ad\n\nComment “Deal” 👇❤️\nSo you don’t miss any of our latest finds! 🎉\n✔️See it here: 👉 ${product.postUrl}`);
+  }
+});
+test("creative hooks reject invented facts and fall back only when validation fails", () => {
+  const p = extractWalmartProduct(withWas, input, walmart);
+  const valid = "waittt {{PRICE}} for {{SHORT_TITLE}} 😭🔥\ncheck the comment 👇";
+  assert.equal(buildFacebookPost(p, "Disney Toniebox Starter Set", valid), "waittt $59.00 for Disney Toniebox Starter Set 😭🔥\ncheck the comment 👇");
+  for (const invalid of [
+    "waittt this is $5 for {{SHORT_TITLE}}", "{{SHORT_TITLE}} is the lowest price ever",
+    "{{SHORT_TITLE}} is almost sold out", "{{SHORT_TITLE}} is on sale", "{{SHORT_TITLE}} is 50% off"
+  ]) {
+    assert.equal(validFacebookHookTemplate(invalid, p.rawTitle), false);
+    assert.equal(buildFacebookPost(p, "Disney Toniebox Starter Set", invalid), "omggg Disney Toniebox Starter Set for $59.00?! this is such a good find 👀🔥\nLink in Comment !! 🔗⬇️");
+  }
 });
 test("Telegram native copy buttons include up to 256 characters and omit only an oversized button", async () => {
   const bodies = [];
