@@ -39,10 +39,16 @@ export type SovrnSourceIdentitySummary = {
   walmartSelectedVariant?: {
     urlItemId?: string;
     rootItemId?: string;
+    rootProductId?: string;
     internalProductId?: string;
+    displayVariantProductId?: string;
     selectedItemId?: string;
     selectedVariantIds: string[];
     selectedMappedProductIds: string[];
+    variantsMapCount: number;
+    displayedRecordPresent: boolean;
+    selectedAttributeEvidenceCount: number;
+    selectionShape: "SIMPLE_ROOT" | "FULL_ATTRIBUTE_MAP" | "DISPLAYED_RECORD_ATTRIBUTES" | "UNKNOWN";
     model?: string;
     color?: string;
     sizeOrCapacity?: string;
@@ -68,6 +74,25 @@ export type SovrnPilotIdentityAssessment = {
   sovrnVariantEvidence: SovrnVariantEvidence;
 };
 
+export type WalmartSovrnPriceGate = {
+  eligible: boolean;
+  reason: "EXACT_CURRENT_PRICE_PARITY" | "WALMART_CURRENT_PRICE_UNAVAILABLE" | "CURRENT_PRICE_MISMATCH";
+  deltaCents?: number;
+};
+
+export function assessWalmartSovrnPriceGate(walmartCurrent: number | undefined, sovrnCurrent: number | undefined): WalmartSovrnPriceGate {
+  if (typeof walmartCurrent !== "number" || !Number.isFinite(walmartCurrent) || walmartCurrent <= 0) {
+    return { eligible: false, reason: "WALMART_CURRENT_PRICE_UNAVAILABLE" };
+  }
+  if (typeof sovrnCurrent !== "number" || !Number.isFinite(sovrnCurrent) || sovrnCurrent <= 0) {
+    return { eligible: false, reason: "CURRENT_PRICE_MISMATCH" };
+  }
+  const deltaCents = Math.round(sovrnCurrent * 100) - Math.round(walmartCurrent * 100);
+  return deltaCents === 0
+    ? { eligible: true, reason: "EXACT_CURRENT_PRICE_PARITY", deltaCents }
+    : { eligible: false, reason: "CURRENT_PRICE_MISMATCH", deltaCents };
+}
+
 const decodeHtml = (value: string): string => value
   .replace(/&quot;|&#34;/gi, '"').replace(/&apos;|&#39;/gi, "'")
   .replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">");
@@ -91,16 +116,17 @@ const record = (value: unknown): Record<string, unknown> | undefined =>
 
 function walmartSelectedVariant(html: string, urlItemId?: string): SovrnSourceIdentitySummary["walmartSelectedVariant"] {
   const script = html.match(/<script\b[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i)?.[1];
-  if (!script) return { urlItemId, selectedVariantIds: [], selectedMappedProductIds: [], identityStatus: "UNCONFIRMED" };
+  if (!script) return { urlItemId, selectedVariantIds: [], selectedMappedProductIds: [], variantsMapCount: 0, displayedRecordPresent: false, selectedAttributeEvidenceCount: 0, selectionShape: "UNKNOWN", identityStatus: "UNCONFIRMED" };
   let parsed: unknown;
   try { parsed = JSON.parse(script); } catch {
-    return { urlItemId, selectedVariantIds: [], selectedMappedProductIds: [], identityStatus: "UNCONFIRMED" };
+    return { urlItemId, selectedVariantIds: [], selectedMappedProductIds: [], variantsMapCount: 0, displayedRecordPresent: false, selectedAttributeEvidenceCount: 0, selectionShape: "UNKNOWN", identityStatus: "UNCONFIRMED" };
   }
   const pageProps = record(record(parsed)?.props)?.pageProps;
   const page = record(pageProps);
   const product = record(record(record(page?.initialData)?.data)?.product) ?? record(page?.product);
-  if (!product) return { urlItemId, selectedVariantIds: [], selectedMappedProductIds: [], identityStatus: "UNCONFIRMED" };
+  if (!product) return { urlItemId, selectedVariantIds: [], selectedMappedProductIds: [], variantsMapCount: 0, displayedRecordPresent: false, selectedAttributeEvidenceCount: 0, selectionShape: "UNKNOWN", identityStatus: "UNCONFIRMED" };
   const rootItemId = clean(product.usItemId);
+  const rootProductId = clean(product.id);
   const displayVariantProductId = clean(product.displayVariantProductId);
   const internalProductId = displayVariantProductId ?? clean(product.id);
   const selectedVariantIds = Array.isArray(product.selectedVariantIds)
@@ -108,15 +134,32 @@ function walmartSelectedVariant(html: string, urlItemId?: string): SovrnSourceId
     : [];
   const productIdMap = record(product.variantProductIdMap);
   const selectedMappedProductIds = selectedVariantIds.map(id => clean(productIdMap?.[id])).filter((value): value is string => Boolean(value));
-  const selected = displayVariantProductId ? record(record(product.variantsMap)?.[displayVariantProductId]) : undefined;
+  const variantsMap = record(product.variantsMap);
+  const variantsMapCount = variantsMap ? Object.keys(variantsMap).length : 0;
+  const selected = displayVariantProductId ? record(variantsMap?.[displayVariantProductId]) : undefined;
+  const selectedAttributes = Array.isArray(selected?.variants)
+    ? selected.variants.map(clean).filter((value): value is string => Boolean(value))
+    : [];
+  const selectedAttributeEvidenceCount = selectedVariantIds.filter(id => selectedAttributes.includes(id)).length;
   const hasVariantState = Boolean(displayVariantProductId || selectedVariantIds.length);
   const selectedItemId = clean(selected?.usItemId) ?? (!hasVariantState ? rootItemId : undefined);
   const mappingsAgree = Boolean(displayVariantProductId && selectedVariantIds.length &&
     selectedMappedProductIds.length === selectedVariantIds.length && selectedMappedProductIds.every(id => id === displayVariantProductId));
+  const selectedAttributesAgree = Boolean(displayVariantProductId && selectedVariantIds.length &&
+    selectedAttributeEvidenceCount === selectedVariantIds.length);
+  const displayedRecordIdentityAgree = Boolean(displayVariantProductId && selectedVariantIds.length &&
+    rootProductId === displayVariantProductId && selectedItemId === urlItemId);
+  const simpleRootAgree = Boolean(rootItemId === urlItemId && !selectedVariantIds.length &&
+    (!displayVariantProductId || (!rootProductId || rootProductId === displayVariantProductId)) &&
+    (!selected || selectedItemId === urlItemId));
+  const selectionShape = simpleRootAgree ? "SIMPLE_ROOT"
+    : mappingsAgree ? "FULL_ATTRIBUTE_MAP"
+      : selectedAttributesAgree || displayedRecordIdentityAgree ? "DISPLAYED_RECORD_ATTRIBUTES"
+        : "UNKNOWN";
   const identityStatus = !urlItemId || !rootItemId ? "UNCONFIRMED"
     : urlItemId !== rootItemId ? "CONFLICT"
       : hasVariantState
-        ? selectedItemId === urlItemId && mappingsAgree ? "CONFIRMED" : selectedItemId && selectedItemId !== urlItemId ? "CONFLICT" : "UNCONFIRMED"
+        ? simpleRootAgree || (selectedItemId === urlItemId && (mappingsAgree || selectedAttributesAgree || displayedRecordIdentityAgree)) ? "CONFIRMED" : selectedItemId && selectedItemId !== urlItemId ? "CONFLICT" : "UNCONFIRMED"
         : "CONFIRMED";
   const selectedText = [clean(selected?.name), clean(product.name), ...selectedVariantIds].filter(Boolean).join(" ");
   const color = clean(selected?.color ?? product.color) ?? selectedVariantIds
@@ -126,7 +169,9 @@ function walmartSelectedVariant(html: string, urlItemId?: string): SovrnSourceId
   const sizeOrCapacity = selectedText.match(/\b(\d+(?:\.\d+)?\s*(?:fl\.?\s*oz\.?|oz\.?|g|kg|lb\.?|inch(?:es)?|in\.?|qt\.?|gal(?:lon)?s?))\b/i)?.[1];
   const pack = selectedText.match(/\b(\d+\s*(?:pack|count|ct))\b/i)?.[1];
   return {
-    urlItemId, rootItemId, internalProductId, selectedItemId, selectedVariantIds, selectedMappedProductIds,
+    urlItemId, rootItemId, rootProductId, internalProductId, displayVariantProductId, selectedItemId,
+    selectedVariantIds, selectedMappedProductIds, variantsMapCount, displayedRecordPresent: Boolean(selected),
+    selectedAttributeEvidenceCount, selectionShape,
     model, color, sizeOrCapacity, pack, identityStatus
   };
 }

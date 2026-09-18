@@ -1,7 +1,7 @@
 import { SovrnClient } from "../src/stores/sovrn/client";
 import { runSovrnPilotLookups, summarizeSovrnPilotLookup, type SovrnPilotCandidate } from "../src/stores/sovrn/feasibility";
 import { merchantMatchesStore } from "../src/stores/sovrn/merchant-registry";
-import { assessSovrnPilotIdentity, fetchSovrnSourceIdentities } from "../src/stores/sovrn/source-identity-feasibility";
+import { assessSovrnPilotIdentity, assessWalmartSovrnPriceGate, fetchSovrnSourceIdentities } from "../src/stores/sovrn/source-identity-feasibility";
 import { resolveUrl } from "../src/stores/resolve-url";
 
 const WALMART_CANDIDATES = [
@@ -124,6 +124,7 @@ async function main(): Promise<void> {
     const sovrnReference = referenceValue(summaryOffer?.salePrice, summaryOffer?.retailPrice);
     const currentParity = walmartCurrent === undefined || typeof sovrnCurrent !== "number"
       ? "UNAVAILABLE" : cents(walmartCurrent) === cents(sovrnCurrent) ? "EXACT" : "DIFFERENT";
+    const futurePriceGate = assessWalmartSovrnPriceGate(walmartCurrent, typeof sovrnCurrent === "number" ? sovrnCurrent : undefined);
     const variantAccepted = ["EXACT_VARIANT_MATCH", "NO_VARIANT_CONFLICT"].includes(identityAssessment.variantClassification);
     const imageParity = imageValidation.valid === true && variantAccepted ? "CONSISTENT_WITH_SELECTED_IDENTITY" : "UNCONFIRMED";
     const usable = summary.technicalUsability === true && imageValidation.valid === true &&
@@ -164,6 +165,7 @@ async function main(): Promise<void> {
         twoCentReferenceSpread: typeof sovrnCurrent === "number" && typeof sovrnReference === "number" &&
           cents(sovrnReference)! - cents(sovrnCurrent)! === 2
       },
+      futurePriceGate,
       imageParity, usable,
       postUrlPreserved: source?.existingProduct?.postUrlPreserved === true,
       sovrnDeeplinkUsedAsPostUrl: false

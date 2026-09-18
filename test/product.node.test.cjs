@@ -89,6 +89,44 @@ test("embedded Walmart state fallback", () => {
   assert.equal(p.oldPrice.value, 99);
 });
 
+function walmartSimpleProductFixture(overrides = {}) {
+  const product = {
+    usItemId: "19658170815",
+    id: "52HQJSZFHM45",
+    displayVariantProductId: "52HQJSZFHM45",
+    name: "Ozark Trail Disposable Instant Charcoal Grill 1 lb. Charcoal Content",
+    model: "32500LIS",
+    canonicalUrl: "/ip/Ozark-Trail-Grill/19658170815",
+    imageInfo: { thumbnailUrl: "https://i5.walmartimages.com/ozark.jpeg" },
+    priceInfo: { currentPrice: { price: 9.88, currencyUnit: "USD" } },
+    ...overrides
+  };
+  return `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { initialData: { data: { product } } } } })}</script>`;
+}
+
+const ozarkUrl = "https://www.walmart.com/ip/Ozark-Trail-Grill/19658170815";
+
+test("Walmart simple root product is accepted without artificial selected-variant mappings", () => {
+  const p = extractWalmartProduct(walmartSimpleProductFixture(), input, ozarkUrl);
+  assert.equal(p.rawTitle, "Ozark Trail Disposable Instant Charcoal Grill 1 lb. Charcoal Content");
+  assert.equal(p.currentPrice.value, 9.88);
+  assert.equal(p.imageUrl, "https://i5.walmartimages.com/ozark.jpeg");
+  assert.equal(p.canonicalProductUrl, ozarkUrl);
+});
+
+test("Walmart simple product still requires root and canonical identity to match the URL", () => {
+  assert.throws(() => extractWalmartProduct(walmartSimpleProductFixture({ usItemId: "999" }), input, ozarkUrl), { code: "WALMART_VARIANT_MISMATCH" });
+  assert.throws(() => extractWalmartProduct(walmartSimpleProductFixture({ canonicalUrl: "/ip/other/999" }), input, ozarkUrl), { code: "WALMART_VARIANT_MISMATCH" });
+});
+
+test("Walmart unknown multi-variant state without a selected product fails closed", () => {
+  const variantsMap = {
+    FIRST: { id: "FIRST", usItemId: "19658170815", priceInfo: { currentPrice: { price: 1 } } },
+    SECOND: { id: "SECOND", usItemId: "2", priceInfo: { currentPrice: { price: 2 } } }
+  };
+  assert.throws(() => extractWalmartProduct(walmartSimpleProductFixture({ displayVariantProductId: undefined, variantsMap }), input, ozarkUrl), { code: "WALMART_VARIANT_MISMATCH" });
+});
+
 function walmartVariantFixture(overrides = {}) {
   const blackId = "54IS2LOFD40O";
   const cyberspaceId = "27GHL5QK1BUW";
@@ -181,6 +219,70 @@ test("ambiguous family JSON-LD cannot override validated Walmart selected varian
   assert.equal(p.currentPrice.value, 79.99);
   assert.equal(p.imageUrl, "https://i5.walmartimages.com/black.jpeg");
   assert.notEqual(p.rawTitle, "Ambiguous product family");
+});
+
+function walmartAlternateVariantFixture(overrides = {}) {
+  const selectedId = "4PUV4EGPQRNS";
+  const siblingId = "OTHERPRODUCT";
+  const selectedVariantIds = ["volume_capacity-26oz", "base_color-cyberspace"];
+  const selected = {
+    id: selectedId,
+    usItemId: "18317156543",
+    name: "Ninja BlendBOSS DB351CY Cyberspace 26 oz",
+    model: "DB351CY",
+    variants: selectedVariantIds,
+    imageInfo: { thumbnailUrl: "https://i5.walmartimages.com/blendboss-cyberspace.jpeg" },
+    priceInfo: { currentPrice: { price: 129.97, currencyUnit: "USD" }, wasPrice: { price: 129.99, currencyUnit: "USD" } },
+    ...(overrides.selected ?? {})
+  };
+  const sibling = {
+    id: siblingId,
+    usItemId: "999999",
+    variants: ["volume_capacity-32oz", "base_color-black"],
+    imageInfo: { thumbnailUrl: "https://i5.walmartimages.com/sibling.jpeg" },
+    priceInfo: { currentPrice: { price: 49, currencyUnit: "USD" } },
+    ...(overrides.sibling ?? {})
+  };
+  const product = {
+    usItemId: "18317156543",
+    id: selectedId,
+    displayVariantProductId: selectedId,
+    selectedVariantIds,
+    variantProductIdMap: {},
+    variantsMap: { [siblingId]: sibling, [selectedId]: selected },
+    canonicalUrl: "/ip/Ninja-BlendBOSS/18317156543",
+    name: selected.name,
+    imageInfo: selected.imageInfo,
+    priceInfo: selected.priceInfo,
+    ...(overrides.product ?? {})
+  };
+  return `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { initialData: { data: { product } } } } })}</script>`;
+}
+
+const blendBossUrl = "https://www.walmart.com/ip/Ninja-BlendBOSS/18317156543";
+
+test("Walmart alternate selected-product shape ties BlendBOSS attributes and item identity to the displayed record", () => {
+  const p = extractWalmartProduct(walmartAlternateVariantFixture(), input, blendBossUrl);
+  assert.equal(p.rawTitle, "Ninja BlendBOSS DB351CY Cyberspace 26 oz");
+  assert.equal(p.currentPrice.value, 129.97);
+  assert.equal(p.oldPrice.value, 129.99);
+  assert.equal(p.imageUrl, "https://i5.walmartimages.com/blendboss-cyberspace.jpeg");
+  const identityOnly = extractWalmartProduct(walmartAlternateVariantFixture({ selected: { variants: undefined } }), input, blendBossUrl);
+  assert.equal(identityOnly.currentPrice.value, 129.97);
+});
+
+test("Walmart alternate selected-product shape rejects identity conflicts and never consumes sibling fields", () => {
+  assert.throws(() => extractWalmartProduct(walmartAlternateVariantFixture({ selected: { usItemId: "999999" } }), input, blendBossUrl), { code: "WALMART_VARIANT_MISMATCH" });
+  assert.throws(() => extractWalmartProduct(walmartAlternateVariantFixture({ selected: { variants: ["base_color-black"] } }), input, blendBossUrl), { code: "WALMART_VARIANT_MISMATCH" });
+  assert.throws(() => extractWalmartProduct(walmartAlternateVariantFixture({
+    selected: { variants: undefined }, product: { id: "FAMILYPRODUCT" }
+  }), input, blendBossUrl), { code: "WALMART_VARIANT_MISMATCH" });
+  const p = extractWalmartProduct(walmartAlternateVariantFixture({ sibling: {
+    imageInfo: { thumbnailUrl: "https://i5.walmartimages.com/wrong.jpeg" },
+    priceInfo: { currentPrice: { price: 1, currencyUnit: "USD" } }
+  } }), input, blendBossUrl);
+  assert.equal(p.currentPrice.value, 129.97);
+  assert.equal(p.imageUrl, "https://i5.walmartimages.com/blendboss-cyberspace.jpeg");
 });
 test("normal Walmart fixtures expose only safe title-source diagnostics", () => {
   assert.deepEqual(inspectWalmartHtml(withWas, walmart), {

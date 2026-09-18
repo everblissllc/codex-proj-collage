@@ -12,7 +12,7 @@ const { merchantMatchesStore, sovrnStoreForHostname } = req("stores/sovrn/mercha
 const { buildSovrnPlainlink } = req("stores/sovrn/plainlink.js");
 const { mapSovrnProduct, buildSovrnFacebookPost } = req("stores/sovrn/product-mapper.js");
 const { describeSovrnPriceResponse, describeSovrnResponse, inspectApprovedMerchants } = req("stores/sovrn/response-shape.js");
-const { assessSovrnPilotIdentity, inspectSovrnSourceIdentity } = req("stores/sovrn/source-identity-feasibility.js");
+const { assessSovrnPilotIdentity, assessWalmartSovrnPriceGate, inspectSovrnSourceIdentity } = req("stores/sovrn/source-identity-feasibility.js");
 const { WorkersAICopyProvider } = req("ai/workers-ai-provider.js");
 
 const config = { secretKey: "secret-value", siteApiKey: "site-value", market: "usd_en", campaignId: "123" };
@@ -528,10 +528,16 @@ test("Walmart feasibility evidence is bound to the URL-selected embedded variant
   assert.deepEqual(summary.walmartSelectedVariant, {
     urlItemId: "13162221820",
     rootItemId: "13162221820",
+    rootProductId: selectedId,
     internalProductId: selectedId,
+    displayVariantProductId: selectedId,
     selectedItemId: "13162221820",
     selectedVariantIds: ["actual_color-black"],
     selectedMappedProductIds: [selectedId],
+    variantsMapCount: 2,
+    displayedRecordPresent: true,
+    selectedAttributeEvidenceCount: 1,
+    selectionShape: "FULL_ATTRIBUTE_MAP",
     model: "PB045",
     color: "black",
     sizeOrCapacity: undefined,
@@ -541,6 +547,54 @@ test("Walmart feasibility evidence is bound to the URL-selected embedded variant
   assert.equal(summary.existingProduct.currentPrice.value, 79.99);
   assert.equal(summary.existingProduct.oldPrice.value, 89);
   assert.equal(summary.existingProduct.imageHostname, "i5.walmartimages.com");
+});
+
+test("Walmart source inspection confirms simple-root and displayed-record attribute shapes", () => {
+  const inspect = (itemId, product) => {
+    const html = `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { initialData: { data: { product } } } } })}</script>`;
+    return inspectSovrnSourceIdentity({
+      store: "walmart", sourceUrl: `https://www.walmart.com/ip/item/${itemId}`,
+      resolvedUrl: `https://www.walmart.com/ip/item/${itemId}`, httpStatus: 200,
+      responseByteLength: html.length, redirectCount: 0, html
+    });
+  };
+  const simple = inspect("19658170815", {
+    id: "52HQJSZFHM45", usItemId: "19658170815", displayVariantProductId: "52HQJSZFHM45",
+    name: "Ozark Trail Grill", imageUrl: "https://i5.walmartimages.com/ozark.jpeg",
+    priceInfo: { currentPrice: { price: 9.88 } }
+  });
+  assert.equal(simple.walmartSelectedVariant.selectionShape, "SIMPLE_ROOT");
+  assert.equal(simple.walmartSelectedVariant.identityStatus, "CONFIRMED");
+  assert.equal(simple.existingProduct.currentPrice.value, 9.88);
+
+  const selectedId = "4PUV4EGPQRNS";
+  const selectedVariantIds = ["volume_capacity-26oz", "base_color-cyberspace"];
+  const alternate = inspect("18317156543", {
+    id: selectedId, usItemId: "18317156543", displayVariantProductId: selectedId, selectedVariantIds,
+    variantProductIdMap: {}, name: "Ninja BlendBOSS DB351CY Cyberspace 26 oz",
+    imageInfo: { thumbnailUrl: "https://i5.walmartimages.com/blendboss.jpeg" },
+    priceInfo: { currentPrice: { price: 129.97 }, wasPrice: { price: 129.99 } },
+    variantsMap: { [selectedId]: {
+      id: selectedId, usItemId: "18317156543",
+      imageInfo: { thumbnailUrl: "https://i5.walmartimages.com/blendboss.jpeg" },
+      priceInfo: { currentPrice: { price: 129.97 }, wasPrice: { price: 129.99 } }
+    } }
+  });
+  assert.equal(alternate.walmartSelectedVariant.selectionShape, "DISPLAYED_RECORD_ATTRIBUTES");
+  assert.equal(alternate.walmartSelectedVariant.identityStatus, "CONFIRMED");
+  assert.equal(alternate.existingProduct.currentPrice.value, 129.97);
+});
+
+test("future Walmart Sovrn price gate requires exact-cent parity and preserves the Expert Grill stale-price regression", () => {
+  assert.deepEqual(assessWalmartSovrnPriceGate(79.99, 79.99), {
+    eligible: true, reason: "EXACT_CURRENT_PRICE_PARITY", deltaCents: 0
+  });
+  assert.deepEqual(assessWalmartSovrnPriceGate(98, 124), {
+    eligible: false, reason: "CURRENT_PRICE_MISMATCH", deltaCents: 2600
+  });
+  assert.deepEqual(assessWalmartSovrnPriceGate(undefined, 9.88), {
+    eligible: false, reason: "WALMART_CURRENT_PRICE_UNAVAILABLE"
+  });
 });
 
 test("source inspection captures current Target and Ulta selected-size evidence", () => {
