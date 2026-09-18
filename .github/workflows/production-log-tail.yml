@@ -41,7 +41,7 @@ jobs:
               "card_cache_stored", "process_complete", "process_failed",
               "job_processing_failed", "telegram_photo_sent", "telegram_copy_sent",
               "telegram_photo_prepared", "telegram_delivery_failed", "telegram_error_message_failed",
-              "amazon_source_identity"
+              "amazon_source_identity", "walmart_sovrn_decision"
             ]);
             const fields = [
               "requestId", "store", "hostname", "cacheStatus", "reason", "errorCode",
@@ -114,6 +114,21 @@ jobs:
                 const identityStatus = safeAmazonIdentityStatus(entry.sourceIdentityState);
                 if (identityStatus) safe.identityStatus = identityStatus;
                 if (typeof entry.errorCode === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(entry.errorCode)) safe.errorCode = entry.errorCode;
+                process.stdout.write(JSON.stringify(safe) + "\n");
+                return true;
+              }
+              if (entry.event === "walmart_sovrn_decision") {
+                const safe = { event: entry.event };
+                if (["ACCEPTED", "NO_OFFER", "NO_SAME_RETAILER", "IDENTITY_REJECTED", "PRICE_MISMATCH", "INVALID_PRICE", "INVALID_IMAGE", "TIMEOUT", "PROVIDER_ERROR", "NOT_CONFIGURED"].includes(entry.sovrnStatus)) safe.sovrnStatus = entry.sovrnStatus;
+                if (["EXACT_VARIANT_MATCH", "NO_VARIANT_CONFLICT", "VARIANT_CONFLICT", "VARIANT_AMBIGUOUS_HIGH_RISK"].includes(entry.identityClassification)) safe.identityClassification = entry.identityClassification;
+                if (["EXACT", "DIFFERENT", "UNAVAILABLE"].includes(entry.priceParity)) safe.priceParity = entry.priceParity;
+                for (const field of ["walmartCurrentCents", "sovrnCurrentCents"]) {
+                  if (Number.isSafeInteger(entry[field]) && entry[field] > 0) safe[field] = entry[field];
+                }
+                if (Number.isSafeInteger(entry.deltaCents)) safe.deltaCents = entry.deltaCents;
+                if (["EXACT", "DIFFERENT", "WALMART_ONLY", "SOVRN_ONLY", "NEITHER"].includes(entry.referenceParity)) safe.referenceParity = entry.referenceParity;
+                if (typeof entry.sovrnImageValid === "boolean") safe.sovrnImageValid = entry.sovrnImageValid;
+                if (["SOVRN_ENRICHED", "WALMART_FALLBACK"].includes(entry.finalSource)) safe.finalSource = entry.finalSource;
                 process.stdout.write(JSON.stringify(safe) + "\n");
                 return true;
               }
