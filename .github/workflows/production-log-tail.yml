@@ -135,16 +135,12 @@ jobs:
               }
               if (entry.event === "homedepot_sovrn_decision") {
                 const safe = { event: entry.event };
-                if (["ACCEPTED", "NO_OFFER", "NO_SAME_RETAILER", "IDENTITY_REJECTED", "PRICE_MISMATCH", "INVALID_PRICE", "INVALID_IMAGE", "TIMEOUT", "PROVIDER_ERROR", "NOT_CONFIGURED"].includes(entry.sovrnStatus)) safe.sovrnStatus = entry.sovrnStatus;
-                if (["EXACT_VARIANT_MATCH", "NO_VARIANT_CONFLICT", "VARIANT_CONFLICT", "VARIANT_AMBIGUOUS_HIGH_RISK"].includes(entry.identityClassification)) safe.identityClassification = entry.identityClassification;
-                if (["EXACT", "DIFFERENT", "UNAVAILABLE"].includes(entry.priceParity)) safe.priceParity = entry.priceParity;
-                for (const field of ["sourceCurrentCents", "sovrnCurrentCents"]) {
-                  if (Number.isSafeInteger(entry[field]) && entry[field] > 0) safe[field] = entry[field];
-                }
-                if (Number.isSafeInteger(entry.deltaCents)) safe.deltaCents = entry.deltaCents;
-                if (["EXACT", "DIFFERENT", "HOME_DEPOT_ONLY", "SOVRN_ONLY", "NEITHER"].includes(entry.referenceParity)) safe.referenceParity = entry.referenceParity;
+                if (["ACCEPTED", "NO_OFFER", "NO_SAME_RETAILER", "AMBIGUOUS_OFFER", "IDENTITY_REJECTED", "INVALID_PRICE", "INVALID_IMAGE", "TIMEOUT", "PROVIDER_ERROR", "NOT_CONFIGURED"].includes(entry.sovrnStatus)) safe.sovrnStatus = entry.sovrnStatus;
+                if (Number.isSafeInteger(entry.sameRetailerOfferCount) && entry.sameRetailerOfferCount >= 0) safe.sameRetailerOfferCount = entry.sameRetailerOfferCount;
+                if (typeof entry.currentPriceValid === "boolean") safe.currentPriceValid = entry.currentPriceValid;
+                if (["VALID", "ABSENT", "SUPPRESSED_INVALID"].includes(entry.referencePriceStatus)) safe.referencePriceStatus = entry.referencePriceStatus;
                 if (typeof entry.sovrnImageValid === "boolean") safe.sovrnImageValid = entry.sovrnImageValid;
-                if (["SOVRN_ENRICHED", "HOME_DEPOT_FALLBACK"].includes(entry.finalSource)) safe.finalSource = entry.finalSource;
+                if (["SOVRN_PRIMARY", "NONE"].includes(entry.finalSource)) safe.finalSource = entry.finalSource;
                 process.stdout.write(JSON.stringify(safe) + "\n");
                 return true;
               }
