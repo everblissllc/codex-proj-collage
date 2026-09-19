@@ -6,11 +6,8 @@ const req = relative => require(path.join(process.env.COMPILED_ROOT, relative));
 const { extractHomeDepotProduct, homeDepotProductId, inspectHomeDepotProduct } = req("stores/homedepot/extractor.js");
 const { PriceComparisonSovrnProductProvider } = req("stores/sovrn/product-provider.js");
 const { SovrnClient } = req("stores/sovrn/client.js");
-const { buildSovrnPlainlink } = req("stores/sovrn/plainlink.js");
-const { merchantMatchesStore, sovrnStoreForHostname } = req("stores/sovrn/merchant-registry.js");
-const { assessSovrnIdentity, inspectSovrnSource } = req("stores/sovrn/source-identity.js");
-const { assessHomeDepotSovrnParity } = req("stores/homedepot/sovrn-feasibility.js");
-const { enrichHomeDepotWithSovrn } = req("stores/homedepot/sovrn-integration.js");
+const { sourceHomeDepotWithSovrn } = req("stores/homedepot/sovrn-integration.js");
+const { homeDepotIdentityFromUrl } = req("stores/homedepot/url-identity.js");
 const { inspectHomeDepotFetchResponse } = req("stores/homedepot/fetch-diagnostics.js");
 const { detectStore } = req("stores/detect-store.js");
 const { processProductLink } = req("orchestration/process-product-link.js");
@@ -135,285 +132,189 @@ test("Home Depot prices and image stay bound to the selected product record", ()
   assert.equal(noReference.oldPrice, undefined);
 });
 
-test("Home Depot Sovrn adapter strips tracking and enforces canonical merchant aliases", () => {
-  assert.equal(sovrnStoreForHostname("www.homedepot.com"), "homedepot");
-  assert.equal(merchantMatchesStore("homedepot", "The Home Depot"), true);
-  assert.equal(merchantMatchesStore("homedepot", "Home Depot"), true);
-  assert.equal(merchantMatchesStore("homedepot", "Other Merchant"), false);
-  const lookup = buildSovrnPlainlink(submittedUrl, "homedepot");
-  assert.equal(lookup.productIdentity, "206288225");
-  assert.equal(lookup.plainlink, `${productUrl}?keep=EXACT%2Bvalue`);
+
+const fullProductUrl = "https://www.homedepot.com/p/Husky-Ready-to-Assemble-24-Gauge-Steel-Wall-Mounted-Garage-Cabinet-in-Black-28-in-W-x-29-7-in-H-x-12-in-D-G2802W-US/206288225";
+const sovrnTitle = "Husky Ready-to-Assemble 24-Gauge Steel Wall Mounted Garage Cabinet in Black 28 in. W x 29.7 in. H x 12 in. D";
+const sovrnOffer = (overrides = {}) => ({
+  merchant: { name: "The Home Depot", id: 1061 }, name: sovrnTitle,
+  salePrice: 134.10, retailPrice: 149, currency: "USD", affiliatable: true,
+  image, ...overrides
+});
+const providerFor = offers => new PriceComparisonSovrnProductProvider(new SovrnClient(
+  { secretKey: "secret", siteApiKey: "site", market: "usd_en" }, async () => Response.json(offers)
+));
+const providerInput = (resolvedUrl = fullProductUrl, postUrl = submittedUrl) => {
+  return { store: "homedepot", postUrl, resolvedUrl };
+};
+
+
+
+test("Home Depot runtime URL identity uses only the terminal Internet number", () => {
+  assert.deepEqual(homeDepotIdentityFromUrl(fullProductUrl), { productId: "206288225", productIdConfirmed: true });
+  assert.deepEqual(homeDepotIdentityFromUrl("https://www.homedepot.com/p/Fake-Brand-Red-Wrong-Model/206288225"), {
+    productId: "206288225", productIdConfirmed: true
+  });
+  assert.deepEqual(homeDepotIdentityFromUrl("https://www.homedepot.com/p/product/206288225"), {
+    productId: "206288225", productIdConfirmed: true
+  });
 });
 
-test("Home Depot provider accepts only The Home Depot and matching model/configuration", async () => {
-  const source = extractHomeDepotProduct(fixture(), submittedUrl, productUrl);
-  const offers = [
-    { merchant: { name: "Other Merchant", id: 1 }, name: title, salePrice: 1, retailPrice: 2, currency: "USD", affiliatable: true, image },
-    { merchant: { name: "The Home Depot", id: 123 }, name: `${title} G2802W-US`, salePrice: 134.10, retailPrice: 149, currency: "USD", affiliatable: true, image }
-  ];
-  const provider = new PriceComparisonSovrnProductProvider(new SovrnClient(
-    { secretKey: "secret", siteApiKey: "site", market: "usd_en" }, async () => Response.json(offers)
-  ));
-  const result = await provider.product({ store: "homedepot", sourceProduct: source, postUrl: submittedUrl, resolvedUrl: productUrl, sourceHtml: fixture() });
+test("Home Depot direct and tracker routes avoid the blocked PDP and preserve exact postUrl", async () => {
+  const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  for (const input of [fullProductUrl, "https://tracker.example.org/home-depot?id=exact-original"]) {
+    let pdpFetches = 0;
+    const logs = [];
+    const oldLog = console.log;
+    try {
+      console.log = line => logs.push(JSON.parse(line));
+      const result = await processProductLink(input, {
+        fetcher: async url => {
+          const value = String(url);
+          if (value.startsWith("https://tracker.example.org/")) return new Response(null, { status: 302, headers: { location: fullProductUrl } });
+          if (value === fullProductUrl) { pdpFetches++; throw new Error("PDP must not be fetched"); }
+          if (value === image) return new Response(new Uint8Array([255, 216, 255]), { headers: { "content-type": "image/jpeg" } });
+          throw new Error("unexpected URL " + value);
+        },
+        dnsCheck: async () => {}, sovrnProductProvider: providerFor([sovrnOffer()]),
+        copyProvider: { generate: async () => ({ shortTitle: "Husky Wall Cabinet", facebookHookTemplate: "{{SHORT_TITLE}} {{PRICE}} 👀" }) },
+        renderer: { screenshot: async () => ({ bytes: png, mimeType: "image/png" }) },
+        disclosure: "#Ad", requestId: "homedepot-sovrn-primary"
+      });
+      assert.equal(pdpFetches, 0);
+      assert.equal(result.product.postUrl, input);
+      assert.equal(result.product.currentPrice.formatted, "$134.10");
+      assert.equal(result.product.oldPrice.formatted, "$149.00");
+      assert.deepEqual(result.product.homeDepot, { productId: "206288225" });
+      assert.equal(logs.find(item => item.event === "homedepot_sovrn_decision").finalSource, "SOVRN_PRIMARY");
+      assert.equal(logs.some(item => item.event === "homedepot_fetch_diagnostics"), false);
+    } finally { console.log = oldLog; }
+  }
+});
+
+test("Home Depot provider selects only exact The Home Depot merchant and ignores alternatives", async () => {
+  const result = await providerFor([
+    sovrnOffer({ merchant: { name: "Other Merchant" }, salePrice: 1 }),
+    sovrnOffer({ affiliatable: false })
+  ]).product(providerInput());
+  assert.equal(result.sameRetailerOfferCount, 1);
   assert.equal(result.product.currentPrice.value, 134.1);
   assert.equal(result.product.oldPrice.value, 149);
   assert.equal(result.product.postUrl, submittedUrl);
-  assert.equal(result.identity.variantClassification, "EXACT_VARIANT_MATCH");
   assert.equal(result.identity.productMatchConfirmed, true);
-  const aliasOnly = new PriceComparisonSovrnProductProvider(new SovrnClient(
-    { secretKey: "secret", siteApiKey: "site", market: "usd_en" },
-    async () => Response.json([{ merchant: { name: "Home Depot", id: 123 }, name: `${title} G2802W-US`, salePrice: 134.10, retailPrice: 149, currency: "USD", affiliatable: true, image }])
-  ));
-  await assert.rejects(
-    aliasOnly.product({ store: "homedepot", sourceProduct: source, postUrl: submittedUrl, resolvedUrl: productUrl, sourceHtml: fixture() }),
-    { code: "SOVRN_NO_SAME_RETAILER_OFFER" }
-  );
 });
 
-test("Home Depot exact-cent parity is required by the feasibility decision", () => {
-  const cents = value => Number.isFinite(value) ? Math.round(value * 100) : undefined;
-  assert.equal(cents(134.10), 13410);
-  assert.equal(cents(134.10) === cents(134.10), true);
-  assert.equal(cents(134.10) === cents(134.11), false);
-  assert.equal(cents(149) === cents(149), true);
-});
-
-const sourceEvidence = () => {
-  const source = extractHomeDepotProduct(fixture(), submittedUrl, productUrl);
-  return {
-    source,
-    evidence: inspectSovrnSource({ store: "homedepot", sourceProduct: source, postUrl: submittedUrl, resolvedUrl: productUrl, html: fixture() })
-  };
-};
-const wireOffer = (overrides = {}) => ({
-  merchantName: "The Home Depot", merchantId: 1061, title,
-  salePrice: 134.10, retailPrice: 149, currency: "USD", affiliatable: true,
-  imageUrl: image, stockState: "unknown", identity: {}, ...overrides
-});
-
-test("Home Depot missing Sovrn model accepts all independently matching configuration groups", () => {
-  const { evidence } = sourceEvidence();
-  const result = assessSovrnIdentity(evidence, wireOffer());
-  assert.equal(result.productMatchConfirmed, true);
-  assert.equal(result.variantClassification, "NO_VARIANT_CONFLICT");
-});
-
-test("Home Depot equal models are exact while an explicit model conflict rejects", () => {
-  const { evidence } = sourceEvidence();
-  assert.equal(assessSovrnIdentity(evidence, wireOffer({ identity: { mpn: "G2802W-US" } })).variantClassification, "EXACT_VARIANT_MATCH");
-  const conflict = assessSovrnIdentity(evidence, wireOffer({ identity: { mpn: "OTHER-MODEL" } }));
-  assert.equal(conflict.productMatchConfirmed, false);
-  assert.equal(conflict.variantClassification, "VARIANT_CONFLICT");
-});
-
-test("Home Depot dimension, color, construction, and mounting conflicts reject independently", () => {
-  const { evidence } = sourceEvidence();
-  for (const conflictingTitle of [
-    title.replace("28 in. W", "30 in. W"),
-    title.replace("Black", "White"),
-    title.replace("24-Gauge Steel", "20-Gauge Steel"),
-    title.replace("Wall Mounted", "Freestanding")
-  ]) {
-    const result = assessSovrnIdentity(evidence, wireOffer({ title: conflictingTitle }));
-    assert.equal(result.productMatchConfirmed, false, conflictingTitle);
-    assert.equal(result.variantClassification, "VARIANT_CONFLICT", conflictingTitle);
-  }
-});
-
-test("Home Depot weak title-only evidence remains ambiguous when model is missing", () => {
-  const { evidence } = sourceEvidence();
-  const result = assessSovrnIdentity(evidence, wireOffer({ title: "Husky Garage Cabinet in Black" }));
-  assert.equal(result.productMatchConfirmed, false);
-  assert.equal(result.variantClassification, "VARIANT_AMBIGUOUS_HIGH_RISK");
-});
-
-test("Home Depot identity does not depend on price and exact-cent parity is a separate gate", () => {
-  const { source, evidence } = sourceEvidence();
-  const identity = assessSovrnIdentity(evidence, wireOffer({ salePrice: 1, retailPrice: 2 }));
-  assert.equal(identity.variantClassification, "NO_VARIANT_CONFLICT");
-  const matchingCandidate = { ...source, currentPrice: { value: 134.10, currency: "USD", formatted: "$134.10" }, oldPrice: { value: 149, currency: "USD", formatted: "$149.00" } };
-  assert.deepEqual(assessHomeDepotSovrnParity(source, matchingCandidate, identity), {
-    eligible: true, currentParity: "EXACT", referenceParity: "EXACT",
-    homeDepotCurrentCents: 13410, sovrnCurrentCents: 13410, deltaCents: 0
-  });
-  const staleCandidate = { ...matchingCandidate, currentPrice: { value: 149, currency: "USD", formatted: "$149.00" } };
-  assert.deepEqual(assessHomeDepotSovrnParity(source, staleCandidate, identity), {
-    eligible: false, currentParity: "DIFFERENT", referenceParity: "EXACT",
-    homeDepotCurrentCents: 13410, sovrnCurrentCents: 14900, deltaCents: 1490
-  });
-});
-
-const candidateResult = (source, overrides = {}) => ({
-  product: {
-    ...source,
-    rawTitle: "Validated Sovrn Husky Wall Cabinet",
-    imageUrl: "https://images.thdstatic.com/enriched.jpeg",
-    currentPrice: { value: 134.10, currency: "USD", formatted: "$134.10" },
-    oldPrice: { value: 149, currency: "USD", formatted: "$149.00" },
-    inputUrl: "https://should-not-survive.example/input",
-    postUrl: "https://should-not-survive.example/post",
-    resolvedUrl: "https://should-not-survive.example/resolved",
-    canonicalProductUrl: "https://should-not-survive.example/canonical",
-    ...overrides
-  },
-  identity: {
-    productMatchConfirmed: true,
-    variantClassification: "NO_VARIANT_CONFLICT",
-    sourceVariant: { explicit: true },
-    offerVariant: { explicit: true }
-  },
-  merchantId: 1061
-});
-
-test("Home Depot accepted enrichment changes only title and image after exact parity", async () => {
-  const source = extractHomeDepotProduct(fixture(), submittedUrl, productUrl);
-  const decision = await enrichHomeDepotWithSovrn({
-    sourceProduct: source,
-    sourceHtml: fixture(),
-    provider: { product: async () => candidateResult(source) },
-    validateImage: async url => assert.equal(url, "https://images.thdstatic.com/enriched.jpeg")
-  });
-  assert.equal(decision.telemetry.sovrnStatus, "ACCEPTED");
-  assert.equal(decision.telemetry.finalSource, "SOVRN_ENRICHED");
-  assert.equal(decision.telemetry.priceParity, "EXACT");
-  assert.equal(decision.telemetry.referenceParity, "EXACT");
-  assert.equal(decision.product.rawTitle, "Validated Sovrn Husky Wall Cabinet");
-  assert.equal(decision.product.imageUrl, "https://images.thdstatic.com/enriched.jpeg");
-  assert.equal(decision.product.currentPrice.value, 134.10);
-  assert.equal(decision.product.oldPrice.value, 149);
-  assert.equal(decision.product.postUrl, submittedUrl);
-  assert.equal(decision.product.resolvedUrl, productUrl);
-  assert.equal(decision.product.canonicalProductUrl, productUrl);
-  assert.doesNotMatch(JSON.stringify(decision.product), /should-not-survive/);
-});
-
-test("Home Depot model, dimension, color, and configuration conflicts all fall back", async () => {
-  const source = extractHomeDepotProduct(fixture(), submittedUrl, productUrl);
-  for (const code of ["MODEL", "DIMENSION", "COLOR", "CONFIGURATION"]) {
-    const decision = await enrichHomeDepotWithSovrn({
-      sourceProduct: source,
-      sourceHtml: fixture(),
-      provider: { product: async () => { throw new ProductError("SOVRN_VARIANT_CONFLICT", "extraction", code); } },
-      validateImage: async () => { throw new Error("must not validate"); }
+test("no canonical Home Depot offer fails closed", async () => {
+  for (const offers of [[], [sovrnOffer({ merchant: { name: "Home Depot" } })], [sovrnOffer({ merchant: { name: "Other Merchant" } })]]) {
+    await assert.rejects(providerFor(offers).product(providerInput()), {
+      code: offers.length ? "SOVRN_NO_SAME_RETAILER_OFFER" : "SOVRN_NO_OFFER_FOR_PLAINLINK"
     });
-    assert.equal(decision.telemetry.sovrnStatus, "IDENTITY_REJECTED", code);
-    assert.equal(decision.telemetry.finalSource, "HOME_DEPOT_FALLBACK", code);
-    assert.equal(decision.product, source, code);
   }
 });
 
-test("Home Depot current mismatch and invalid image fall back without exposing Sovrn fields", async () => {
-  const source = extractHomeDepotProduct(fixture(), submittedUrl, productUrl);
-  const mismatch = await enrichHomeDepotWithSovrn({
-    sourceProduct: source,
-    sourceHtml: fixture(),
-    provider: { product: async () => candidateResult(source, { currentPrice: { value: 135, currency: "USD", formatted: "$135.00" } }) },
-    validateImage: async () => {}
+test("multiple canonical Home Depot offers fail closed as ambiguous", async () => {
+  await assert.rejects(providerFor([
+    sovrnOffer(),
+    sovrnOffer({ merchant: { name: "The Home Depot", id: 1062 }, salePrice: 130 })
+  ]).product(providerInput()), { code: "HOME_DEPOT_AMBIGUOUS_OFFER" });
+});
+
+test("Home Depot salePrice is authoritative only when positive USD and cent safe", async () => {
+  const accepted = await providerFor([sovrnOffer()]).product(providerInput());
+  assert.deepEqual(accepted.product.currentPrice, { value: 134.1, currency: "USD", formatted: "$134.10" });
+  for (const patch of [
+    { salePrice: 0 }, { salePrice: -1 }, { salePrice: 12.345 },
+    { salePrice: null }, { salePrice: "134.10" }, { currency: "CAD" }
+  ]) {
+    await assert.rejects(providerFor([sovrnOffer(patch)]).product(providerInput()), { code: "SOVRN_INVALID_PRICE" });
+  }
+});
+
+test("Home Depot reference price is accepted only when cent-safe and higher than current", async () => {
+  const accepted = await providerFor([sovrnOffer()]).product(providerInput());
+  assert.deepEqual(accepted.product.oldPrice, { value: 149, currency: "USD", formatted: "$149.00" });
+  assert.equal(accepted.referencePriceStatus, "VALID");
+  for (const retailPrice of [134.10, 100, 0, 149.001, null, "149"]) {
+    const result = await providerFor([sovrnOffer({ retailPrice })]).product(providerInput());
+    assert.equal(result.product.oldPrice, undefined);
+    assert.ok(["ABSENT", "SUPPRESSED_INVALID"].includes(result.referencePriceStatus));
+  }
+});
+
+const candidateResult = (overrides = {}) => ({
+  product: {
+    store: "homedepot", inputUrl: "https://provider.invalid", postUrl: "https://provider.invalid",
+    resolvedUrl: "https://provider.invalid", canonicalProductUrl: "https://provider.invalid",
+    rawTitle: "Husky Wall Cabinet", imageUrl: image,
+    currentPrice: { value: 134.10, currency: "USD", formatted: "$134.10" },
+    oldPrice: { value: 149, currency: "USD", formatted: "$149.00" }, ...overrides
+  },
+  identity: { productMatchConfirmed: true, variantClassification: "NO_VARIANT_CONFLICT", sourceVariant: { explicit: false }, offerVariant: { explicit: false } },
+  sameRetailerOfferCount: 1, referencePriceStatus: "VALID"
+});
+
+test("Husky Sovrn fixture produces SOVRN_PRIMARY with authoritative prices", async () => {
+  const decision = await sourceHomeDepotWithSovrn({
+    postUrl: submittedUrl, resolvedUrl: fullProductUrl,
+    provider: providerFor([sovrnOffer()]),
+    validateImage: async value => assert.equal(value, image)
   });
-  assert.equal(mismatch.telemetry.sovrnStatus, "PRICE_MISMATCH");
-  assert.equal(mismatch.telemetry.deltaCents, 90);
-  assert.equal(mismatch.telemetry.finalSource, "HOME_DEPOT_FALLBACK");
-  assert.equal(mismatch.product, source);
-  const wrongCurrency = await enrichHomeDepotWithSovrn({
-    sourceProduct: source,
-    sourceHtml: fixture(),
-    provider: { product: async () => candidateResult(source, { currentPrice: { value: 134.10, currency: "CAD", formatted: "CA$134.10" } }) },
-    validateImage: async () => {}
-  });
-  assert.equal(wrongCurrency.telemetry.sovrnStatus, "INVALID_PRICE");
-  assert.equal(wrongCurrency.telemetry.priceParity, "UNAVAILABLE");
-  assert.equal(wrongCurrency.product, source);
-  const invalidImage = await enrichHomeDepotWithSovrn({
-    sourceProduct: source,
-    sourceHtml: fixture(),
-    provider: { product: async () => candidateResult(source) },
+  assert.equal(decision.error, undefined);
+  assert.equal(decision.telemetry.sovrnStatus, "ACCEPTED");
+  assert.equal(decision.telemetry.finalSource, "SOVRN_PRIMARY");
+  assert.equal(decision.telemetry.currentPriceValid, true);
+  assert.equal(decision.telemetry.referencePriceStatus, "VALID");
+  assert.equal(decision.product.currentPrice.formatted, "$134.10");
+  assert.equal(decision.product.oldPrice.formatted, "$149.00");
+  assert.equal(decision.product.postUrl, submittedUrl);
+  assert.deepEqual(decision.product.homeDepot, { productId: "206288225" });
+});
+
+test("invalid image fails Home Depot closed", async () => {
+  const decision = await sourceHomeDepotWithSovrn({
+    postUrl: submittedUrl, resolvedUrl: fullProductUrl,
+    provider: { product: async () => candidateResult() },
     validateImage: async () => { throw new Error("bad image"); }
   });
-  assert.equal(invalidImage.telemetry.sovrnStatus, "INVALID_IMAGE");
-  assert.equal(invalidImage.product, source);
+  assert.equal(decision.product, undefined);
+  assert.equal(decision.telemetry.sovrnStatus, "INVALID_IMAGE");
+  assert.equal(decision.telemetry.finalSource, "NONE");
 });
 
-test("Home Depot suppresses Sovrn-only reference and fails open for empty, timeout, provider, and missing config", async () => {
-  const source = { ...extractHomeDepotProduct(fixture(), submittedUrl, productUrl), oldPrice: undefined };
-  const accepted = await enrichHomeDepotWithSovrn({
-    sourceProduct: source,
-    sourceHtml: fixture(),
-    provider: { product: async () => candidateResult(source, { oldPrice: { value: 149, currency: "USD", formatted: "$149.00" } }) },
+test("Home Depot timeout, provider error, empty response, and missing configuration fail closed", async () => {
+  for (const [provider, status] of [
+    [undefined, "NOT_CONFIGURED"],
+    [{ product: async () => { throw new ProductError("SOVRN_TIMEOUT", "extraction", "safe"); } }, "TIMEOUT"],
+    [{ product: async () => { throw new ProductError("SOVRN_API_ERROR", "extraction", "safe"); } }, "PROVIDER_ERROR"],
+    [providerFor([]), "NO_OFFER"]
+  ]) {
+    const decision = await sourceHomeDepotWithSovrn({
+      postUrl: submittedUrl, resolvedUrl: fullProductUrl, provider, validateImage: async () => {}
+    });
+    assert.equal(decision.product, undefined);
+    assert.equal(decision.telemetry.sovrnStatus, status);
+    assert.equal(decision.telemetry.finalSource, "NONE");
+  }
+});
+
+test("Sovrn deeplink and provider URLs never enter Home Depot ProductData or telemetry", async () => {
+  const decision = await sourceHomeDepotWithSovrn({
+    postUrl: submittedUrl, resolvedUrl: fullProductUrl,
+    provider: { product: async () => candidateResult({ deeplink: "https://sovrn.invalid/private" }) },
     validateImage: async () => {}
   });
-  assert.equal(accepted.telemetry.referenceParity, "SOVRN_ONLY");
-  assert.equal(accepted.product.oldPrice, undefined);
-  for (const [errorCode, status] of [
-    ["SOVRN_NO_OFFER_FOR_PLAINLINK", "NO_OFFER"],
-    ["SOVRN_TIMEOUT", "TIMEOUT"],
-    ["SOVRN_API_ERROR", "PROVIDER_ERROR"]
-  ]) {
-    const decision = await enrichHomeDepotWithSovrn({
-      sourceProduct: source,
-      sourceHtml: fixture(),
-      provider: { product: async () => { throw new ProductError(errorCode, "extraction", "safe"); } },
-      validateImage: async () => {}
-    });
-    assert.equal(decision.telemetry.sovrnStatus, status);
-    assert.equal(decision.product, source);
-  }
-  const missing = await enrichHomeDepotWithSovrn({ sourceProduct: source, sourceHtml: fixture(), validateImage: async () => {} });
-  assert.equal(missing.telemetry.sovrnStatus, "NOT_CONFIGURED");
-  assert.equal(missing.product, source);
+  assert.equal(decision.product.postUrl, submittedUrl);
+  assert.doesNotMatch(JSON.stringify(decision.product), /sovrn\.invalid|provider\.invalid|deeplink/i);
+  assert.doesNotMatch(JSON.stringify(decision.telemetry), /https?:|deeplink|title|chat/i);
 });
 
-test("Home Depot runs through shared card and social output with exact original postUrl", async () => {
-  const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
-  const trackerUrl = "https://tracker.example.org/home-depot?id=exact-original";
-  const logs = [];
-  const oldLog = console.log;
-  try {
-    console.log = line => logs.push(JSON.parse(line));
-    const result = await processProductLink(trackerUrl, {
-      fetcher: async url => {
-        const value = String(url);
-        if (value === trackerUrl) return new Response(null, { status: 302, headers: { location: productUrl } });
-        if (value === productUrl) return new Response(fixture(), { headers: { "content-type": "text/html" } });
-        if (value === "https://images.thdstatic.com/enriched.jpeg") return new Response(new Uint8Array([255, 216, 255]), { headers: { "content-type": "image/jpeg" } });
-        throw new Error(`unexpected URL ${value}`);
-      },
-      dnsCheck: async () => {},
-      sovrnProductProvider: { product: async input => {
-        assert.equal(input.store, "homedepot");
-        assert.equal(input.sourceProduct.currentPrice.value, 134.10);
-        assert.equal(input.postUrl, trackerUrl);
-        return candidateResult(input.sourceProduct);
-      } },
-      copyProvider: { generate: async rawTitle => {
-        assert.equal(rawTitle, "Validated Sovrn Husky Wall Cabinet");
-        return { shortTitle: "Husky Wall Cabinet", facebookHookTemplate: "okayyy {{SHORT_TITLE}} for {{PRICE}}?! 👀" };
-      } },
-      renderer: { screenshot: async (_html, width, height) => {
-        assert.equal(width, 1200);
-        assert.equal(height, 1200);
-        return { bytes: png, mimeType: "image/png" };
-      } },
-      disclosure: "#Ad",
-      requestId: "homedepot-runtime"
-    });
-    assert.equal(result.product.store, "homedepot");
-    assert.equal(result.product.postUrl, trackerUrl);
-    assert.equal(result.product.currentPrice.formatted, "$134.10");
-    assert.equal(result.product.oldPrice.formatted, "$149.00");
-    assert.equal(result.product.homeDepot.productId, "206288225");
-    assert.equal(result.product.homeDepot.model, "G2802W-US");
-    assert.doesNotMatch(result.content.facebookPost, /#Ad|https?:\/\//);
-    assert.ok(result.content.facebookComment.endsWith(trackerUrl));
-    const decision = logs.find(item => item.event === "homedepot_sovrn_decision");
-    assert.equal(decision.finalSource, "SOVRN_ENRICHED");
-    assert.doesNotMatch(JSON.stringify(decision), /https?:|deeplink|secret|chat/i);
-    const fetchDiagnostic = logs.find(item => item.event === "homedepot_fetch_diagnostics");
-    assert.deepEqual(fetchDiagnostic, {
-      event: "homedepot_fetch_diagnostics", requestId: "homedepot-runtime",
-      httpStatus: 200, responseOk: true, normalizedContentType: "text/html",
-      responseByteLength: new TextEncoder().encode(fixture()).byteLength,
-      redirectCount: 1, finalHostIsHomeDepot: true, challengeIndicator: false,
-      responseClass: "SUCCESS_HTML"
-    });
-  } finally { console.log = oldLog; }
+test("Home Depot telemetry contains only approved SOVRN_PRIMARY decision fields", async () => {
+  const decision = await sourceHomeDepotWithSovrn({
+    postUrl: submittedUrl, resolvedUrl: fullProductUrl,
+    provider: { product: async () => candidateResult() }, validateImage: async () => {}
+  });
+  assert.deepEqual(decision.telemetry, {
+    event: "homedepot_sovrn_decision", sovrnStatus: "ACCEPTED", sameRetailerOfferCount: 1,
+    currentPriceValid: true, referencePriceStatus: "VALID", sovrnImageValid: true,
+    finalSource: "SOVRN_PRIMARY"
+  });
 });

@@ -79,7 +79,7 @@ export function assessHomeDepotSovrnIdentity(source: SovrnSourceEvidence, offer:
   const mountingMatch = Boolean(sourceMounting && offerMounting === sourceMounting && containsPhrase(title, evidence.productFamily));
   const packMatch = evidence.packCount === undefined ? offerPack === undefined || offerPack === 1 : offerPack === evidence.packCount;
 
-  const modelConflict = Boolean(offer.identity.mpn && normalized(offer.identity.mpn) !== normalized(evidence.model));
+  const modelConflict = Boolean(offer.identity.mpn && evidence.model && normalized(offer.identity.mpn) !== normalized(evidence.model));
   const dimensionConflict = Boolean(sourceDimensions && dimensionValues.some(value => value !== undefined) && !dimensionsMatch);
   const colorConflict = Boolean(offerColor && evidence.color && normalized(offerColor) !== normalized(evidence.color));
   const constructionConflict = Boolean((offerGauge !== undefined && sourceGauge !== undefined && !numberEqual(offerGauge, sourceGauge)) ||

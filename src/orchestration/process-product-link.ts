@@ -20,9 +20,8 @@ import { resolveAmazonIdentity } from "../stores/amazon/identity";
 import type { AmazonProductProvider } from "../stores/amazon/creators-api-product";
 import type { SovrnProductProvider } from "../stores/sovrn/types";
 import { enrichWalmartWithSovrn } from "../stores/sovrn/walmart-integration";
-import { extractHomeDepotProduct, homeDepotProductId } from "../stores/homedepot/extractor";
-import { enrichHomeDepotWithSovrn } from "../stores/homedepot/sovrn-integration";
-import { inspectHomeDepotFetchResponse } from "../stores/homedepot/fetch-diagnostics";
+import { sourceHomeDepotWithSovrn } from "../stores/homedepot/sovrn-integration";
+import { homeDepotIdentityFromUrl } from "../stores/homedepot/url-identity";
 
 export type ProcessDeps = { fetcher: FetchLike; copyProvider: CopyProvider; renderer: ScreenshotRenderer; pageRenderer?: MobilePageScreenshotRenderer; amazonProductProvider?: AmazonProductProvider; sovrnProductProvider?: SovrnProductProvider; disclosure: string; requestId: string; telegramUserId?: number; dnsCheck?: DnsCheck; cardCache?: CardCache };
 export type ProcessResult = { product: ProductData; content: GeneratedContent; card: CardImage };
@@ -89,21 +88,22 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
     validatePublicUrl(inputUrl);
     const submittedStore = detectStore(inputUrl);
     const extractionStart = Date.now();
-    const page = await resolveUrl(inputUrl, deps.fetcher, undefined, deps.dnsCheck);
+    const page = await resolveUrl(inputUrl, deps.fetcher, undefined, deps.dnsCheck, url => detectStore(url.href) === "homedepot");
     hostname = new URL(page.resolvedUrl).hostname;
     console.log(JSON.stringify({ event: "redirect_resolved", ...base, hostname }));
     store = detectStore(page.resolvedUrl);
     console.log(JSON.stringify({ event: "store_detected", ...base, hostname, store: store ?? "unsupported" }));
     const adapter = store ? screenshotStore(store) : undefined;
     if (submittedStore === "elf" && store !== "elf") {
-      await page.response.body?.cancel();
+      await page.response?.body?.cancel();
       throw new ProductError("UNSAFE_SCREENSHOT_URL", "url", "Cross-store screenshot redirect rejected");
     }
     if (submittedStore === "amazon" && store !== "amazon") {
-      await page.response.body?.cancel();
+      await page.response?.body?.cancel();
       throw new ProductError("UNSAFE_AMAZON_URL", "url", "Amazon redirect left the approved retailer domain");
     }
     if (adapter) {
+      if (!page.response) throw new ProductError("FETCH_FAILED", "extraction", "Store response unavailable");
       const { text: html, byteLength: responseByteLength } = await readLimitedTextWithSize(page.response);
       const diagnostics = adapter.inspect(html);
       const mimeHeader = page.response.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
@@ -125,12 +125,13 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
       return { product, content: result.content, card: result.card };
     }
     if (store !== "walmart" && store !== "amazon" && store !== "homedepot") {
-      await page.response.body?.cancel();
+      await page.response?.body?.cancel();
       throw new ProductError("UNSUPPORTED_STORE", "store", `Unsupported store: ${store ?? "unknown"}`);
     }
     let product: ProductData;
     let canonicalProductId: string | undefined;
     if (store === "walmart") {
+      if (!page.response) throw new ProductError("FETCH_FAILED", "extraction", "Walmart response unavailable");
       const { text: html, byteLength: responseByteLength } = await readLimitedTextWithSize(page.response);
       const contentTypeHeader = page.response.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
       const contentType = contentTypeHeader && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(contentTypeHeader) ? contentTypeHeader : "unknown";
@@ -152,23 +153,19 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
       product = sovrnDecision.product;
       canonicalProductId = [diagnostics.canonicalProductId, walmartProductId(product.canonicalProductUrl ?? product.resolvedUrl)].find(usableWalmartProductId);
     } else if (store === "homedepot") {
-      const fetchInspection = await inspectHomeDepotFetchResponse(page.response, page.resolvedUrl, page.redirectCount);
-      console.log(JSON.stringify({ ...base, ...fetchInspection.diagnostics }));
-      if (fetchInspection.error) throw fetchInspection.error;
-      const html = fetchInspection.html;
-      if (html === undefined) throw new ProductError("EMPTY_PAGE", "extraction", "Home Depot response body unavailable");
-      const sourceProduct = extractHomeDepotProduct(html, inputUrl, page.resolvedUrl);
-      const sovrnDecision = await enrichHomeDepotWithSovrn({
-        sourceProduct,
-        sourceHtml: html,
+      const sovrnDecision = await sourceHomeDepotWithSovrn({
+        postUrl: inputUrl,
+        resolvedUrl: page.resolvedUrl,
         requestId: deps.requestId,
         provider: deps.sovrnProductProvider,
         validateImage: async url => { await fetchImageAsDataUrl(url, deps.fetcher, deps.dnsCheck ?? assertPublicDns, deps.requestId); }
       });
       console.log(JSON.stringify({ ...base, ...sovrnDecision.telemetry }));
+      if (!sovrnDecision.product) throw sovrnDecision.error ?? new ProductError("SOVRN_PROVIDER_ERROR", "extraction", "Home Depot product data is unavailable");
       product = sovrnDecision.product;
-      canonicalProductId = homeDepotProductId(sourceProduct.canonicalProductUrl ?? sourceProduct.resolvedUrl);
+      canonicalProductId = homeDepotIdentityFromUrl(page.resolvedUrl).productId;
     } else {
+      if (!page.response) throw new ProductError("FETCH_FAILED", "extraction", "Amazon response unavailable");
       let identityHtml: string | undefined;
       if (!amazonAsinFromUrl(page.resolvedUrl)) {
         try { identityHtml = (await readLimitedTextWithSize(page.response)).text; }

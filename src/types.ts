@@ -14,7 +14,7 @@ export type AmazonProductMetadata = {
 };
 export type HomeDepotProductMetadata = {
   productId: string;
-  model: string;
+  model?: string;
   brand?: string;
   productFamily?: string;
   color?: string;

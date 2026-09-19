@@ -24,8 +24,17 @@ export type ResolvedPage = {
   redirectCount: number;
   trustedAmazonRedirectIdentity?: TrustedAmazonRedirectIdentity;
 };
+export type ResolvedDestination = Omit<ResolvedPage, "response"> & { response?: Response };
 
-export async function resolveUrl(inputUrl: string, fetcher: FetchLike = workerFetch, accept = "text/html,application/xhtml+xml", dnsCheck: DnsCheck = assertPublicDns): Promise<ResolvedPage> {
+export function resolveUrl(inputUrl: string, fetcher?: FetchLike, accept?: string, dnsCheck?: DnsCheck): Promise<ResolvedPage>;
+export function resolveUrl(inputUrl: string, fetcher: FetchLike, accept: string | undefined, dnsCheck: DnsCheck | undefined, stopBeforeFetch: (url: URL) => boolean): Promise<ResolvedDestination>;
+export async function resolveUrl(
+  inputUrl: string,
+  fetcher: FetchLike = workerFetch,
+  accept = "text/html,application/xhtml+xml",
+  dnsCheck: DnsCheck = assertPublicDns,
+  stopBeforeFetch?: (url: URL) => boolean
+): Promise<ResolvedDestination> {
   let current = validatePublicUrl(inputUrl);
   const seen = new Set<string>();
   const trustedAmazonAsins = new Set<string>();
@@ -34,6 +43,13 @@ export async function resolveUrl(inputUrl: string, fetcher: FetchLike = workerFe
     seen.add(current.href);
     try { await dnsCheck(current.hostname); }
     catch (error) { if (error instanceof ProductError) throw error; throw new ProductError("DNS_CHECK_FAILED", "url", String(error)); }
+    if (stopBeforeFetch?.(current)) {
+      return {
+        resolvedUrl: current.href,
+        redirectCount: hop,
+        trustedAmazonRedirectIdentity: createTrustedAmazonRedirectIdentity(trustedAmazonAsins)
+      };
+    }
     let response: Response;
     try {
       response = await fetcher(current.href, {

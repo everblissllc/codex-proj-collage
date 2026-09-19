@@ -427,7 +427,7 @@ test("Amazon keeps its Creators provider while Sovrn runtime is scoped to Walmar
   const orchestration = readFileSync(path.join(process.cwd(), "src/orchestration/process-product-link.ts"), "utf8");
   assert.match(orchestration, /amazonProductProvider/);
   assert.match(orchestration, /if \(store === "walmart"\)[\s\S]*enrichWalmartWithSovrn/);
-  assert.match(orchestration, /store === "homedepot"[\s\S]*enrichHomeDepotWithSovrn/);
+  assert.match(orchestration, /store === "homedepot"[\s\S]*sourceHomeDepotWithSovrn/);
   assert.doesNotMatch(orchestration, /store === "amazon"[\s\S]{0,300}enrich(?:Walmart|HomeDepot)WithSovrn/);
 });
 

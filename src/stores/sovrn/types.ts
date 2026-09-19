@@ -57,14 +57,20 @@ export type SovrnIdentityAssessment = {
   offerVariant: SovrnVariantEvidence;
 };
 
-export type SovrnProductResult = { product: ProductData; identity: SovrnIdentityAssessment; merchantId?: string | number };
+export type SovrnProductResult = {
+  product: ProductData;
+  identity: SovrnIdentityAssessment;
+  merchantId?: string | number;
+  sameRetailerOfferCount?: number;
+  referencePriceStatus?: "VALID" | "ABSENT" | "SUPPRESSED_INVALID";
+};
 
 export type SovrnProductInput = {
   store: SovrnStoreId;
-  sourceProduct: ProductData;
+  sourceProduct?: ProductData;
   postUrl: string;
   resolvedUrl: string;
-  sourceHtml: string;
+  sourceHtml?: string;
   requestId?: string;
 };
 
