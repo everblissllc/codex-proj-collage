@@ -41,7 +41,8 @@ jobs:
               "card_cache_stored", "process_complete", "process_failed",
               "job_processing_failed", "telegram_photo_sent", "telegram_copy_sent",
               "telegram_photo_prepared", "telegram_delivery_failed", "telegram_error_message_failed",
-              "amazon_source_identity", "walmart_sovrn_decision", "homedepot_sovrn_decision"
+              "amazon_source_identity", "walmart_sovrn_decision", "homedepot_sovrn_decision",
+              "homedepot_fetch_diagnostics"
             ]);
             const fields = [
               "requestId", "store", "hostname", "cacheStatus", "reason", "errorCode",
@@ -144,6 +145,19 @@ jobs:
                 if (["EXACT", "DIFFERENT", "HOME_DEPOT_ONLY", "SOVRN_ONLY", "NEITHER"].includes(entry.referenceParity)) safe.referenceParity = entry.referenceParity;
                 if (typeof entry.sovrnImageValid === "boolean") safe.sovrnImageValid = entry.sovrnImageValid;
                 if (["SOVRN_ENRICHED", "HOME_DEPOT_FALLBACK"].includes(entry.finalSource)) safe.finalSource = entry.finalSource;
+                process.stdout.write(JSON.stringify(safe) + "\n");
+                return true;
+              }
+              if (entry.event === "homedepot_fetch_diagnostics") {
+                const safe = { event: entry.event };
+                if (Number.isInteger(entry.httpStatus) && entry.httpStatus >= 100 && entry.httpStatus <= 599) safe.httpStatus = entry.httpStatus;
+                if (typeof entry.responseOk === "boolean") safe.responseOk = entry.responseOk;
+                if (typeof entry.normalizedContentType === "string" && /^(?:[a-z0-9.+-]+\/[a-z0-9.+-]+|unknown)$/.test(entry.normalizedContentType)) safe.normalizedContentType = entry.normalizedContentType;
+                if (Number.isSafeInteger(entry.responseByteLength) && entry.responseByteLength >= 0) safe.responseByteLength = entry.responseByteLength;
+                if (Number.isInteger(entry.redirectCount) && entry.redirectCount >= 0 && entry.redirectCount <= 5) safe.redirectCount = entry.redirectCount;
+                if (typeof entry.finalHostIsHomeDepot === "boolean") safe.finalHostIsHomeDepot = entry.finalHostIsHomeDepot;
+                if (typeof entry.challengeIndicator === "boolean") safe.challengeIndicator = entry.challengeIndicator;
+                if (["SUCCESS_HTML", "FORBIDDEN", "RATE_LIMITED", "SERVICE_UNAVAILABLE", "REDIRECT_ERROR", "CHALLENGE_OR_INTERSTITIAL", "NON_HTML", "OTHER_HTTP_ERROR"].includes(entry.responseClass)) safe.responseClass = entry.responseClass;
                 process.stdout.write(JSON.stringify(safe) + "\n");
                 return true;
               }

@@ -22,6 +22,7 @@ import type { SovrnProductProvider } from "../stores/sovrn/types";
 import { enrichWalmartWithSovrn } from "../stores/sovrn/walmart-integration";
 import { extractHomeDepotProduct, homeDepotProductId } from "../stores/homedepot/extractor";
 import { enrichHomeDepotWithSovrn } from "../stores/homedepot/sovrn-integration";
+import { inspectHomeDepotFetchResponse } from "../stores/homedepot/fetch-diagnostics";
 
 export type ProcessDeps = { fetcher: FetchLike; copyProvider: CopyProvider; renderer: ScreenshotRenderer; pageRenderer?: MobilePageScreenshotRenderer; amazonProductProvider?: AmazonProductProvider; sovrnProductProvider?: SovrnProductProvider; disclosure: string; requestId: string; telegramUserId?: number; dnsCheck?: DnsCheck; cardCache?: CardCache };
 export type ProcessResult = { product: ProductData; content: GeneratedContent; card: CardImage };
@@ -151,7 +152,11 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
       product = sovrnDecision.product;
       canonicalProductId = [diagnostics.canonicalProductId, walmartProductId(product.canonicalProductUrl ?? product.resolvedUrl)].find(usableWalmartProductId);
     } else if (store === "homedepot") {
-      const { text: html } = await readLimitedTextWithSize(page.response);
+      const fetchInspection = await inspectHomeDepotFetchResponse(page.response, page.resolvedUrl, page.redirectCount);
+      console.log(JSON.stringify({ ...base, ...fetchInspection.diagnostics }));
+      if (fetchInspection.error) throw fetchInspection.error;
+      const html = fetchInspection.html;
+      if (html === undefined) throw new ProductError("EMPTY_PAGE", "extraction", "Home Depot response body unavailable");
       const sourceProduct = extractHomeDepotProduct(html, inputUrl, page.resolvedUrl);
       const sovrnDecision = await enrichHomeDepotWithSovrn({
         sourceProduct,

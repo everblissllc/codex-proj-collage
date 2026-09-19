@@ -11,6 +11,7 @@ const { merchantMatchesStore, sovrnStoreForHostname } = req("stores/sovrn/mercha
 const { assessSovrnIdentity, inspectSovrnSource } = req("stores/sovrn/source-identity.js");
 const { assessHomeDepotSovrnParity } = req("stores/homedepot/sovrn-feasibility.js");
 const { enrichHomeDepotWithSovrn } = req("stores/homedepot/sovrn-integration.js");
+const { inspectHomeDepotFetchResponse } = req("stores/homedepot/fetch-diagnostics.js");
 const { detectStore } = req("stores/detect-store.js");
 const { processProductLink } = req("orchestration/process-product-link.js");
 const { ProductError } = req("types.js");
@@ -37,6 +38,45 @@ const product = (overrides = {}) => ({
 });
 const fixture = (products = [product()], canonical = productUrl) =>
   `<link rel="canonical" href="${canonical}"><script type="application/ld+json">${JSON.stringify({ "@graph": products })}</script>`;
+
+test("Home Depot fetch diagnostics classify bounded HTTP failures without exposing body content", async () => {
+  const forbidden = await inspectHomeDepotFetchResponse(
+    new Response("Access denied. Verify you are human.", { status: 403, headers: { "content-type": "text/html; charset=utf-8" } }),
+    productUrl,
+    2
+  );
+  assert.equal(forbidden.error.code, "STORE_HTTP_ERROR");
+  assert.deepEqual(forbidden.diagnostics, {
+    event: "homedepot_fetch_diagnostics", httpStatus: 403, responseOk: false,
+    normalizedContentType: "text/html", responseByteLength: 36, redirectCount: 2,
+    finalHostIsHomeDepot: true, challengeIndicator: true,
+    responseClass: "CHALLENGE_OR_INTERSTITIAL"
+  });
+  assert.doesNotMatch(JSON.stringify(forbidden.diagnostics), /access denied|verify you are human|https?:\/\//i);
+
+  const rateLimited = await inspectHomeDepotFetchResponse(new Response("busy", { status: 429 }), productUrl, 0);
+  assert.equal(rateLimited.diagnostics.responseClass, "RATE_LIMITED");
+  assert.equal(rateLimited.diagnostics.challengeIndicator, false);
+
+  const unavailable = await inspectHomeDepotFetchResponse(new Response("busy", { status: 503 }), productUrl, 0);
+  assert.equal(unavailable.diagnostics.responseClass, "SERVICE_UNAVAILABLE");
+});
+
+test("Home Depot fetch diagnostics classify successful HTML and non-HTML responses", async () => {
+  const html = await inspectHomeDepotFetchResponse(
+    new Response(fixture(), { headers: { "content-type": "text/html; charset=utf-8" } }), productUrl, 0
+  );
+  assert.equal(html.error, undefined);
+  assert.equal(html.html, fixture());
+  assert.equal(html.diagnostics.responseClass, "SUCCESS_HTML");
+  assert.equal(html.diagnostics.responseByteLength, new TextEncoder().encode(fixture()).byteLength);
+
+  const nonHtml = await inspectHomeDepotFetchResponse(
+    new Response("{}", { headers: { "content-type": "application/json" } }), productUrl, 0
+  );
+  assert.equal(nonHtml.error.code, "NOT_HTML");
+  assert.equal(nonHtml.diagnostics.responseClass, "NON_HTML");
+});
 
 test("Home Depot product identity is the terminal numeric Internet number", () => {
   assert.equal(detectStore(productUrl), "homedepot");
@@ -367,5 +407,13 @@ test("Home Depot runs through shared card and social output with exact original 
     const decision = logs.find(item => item.event === "homedepot_sovrn_decision");
     assert.equal(decision.finalSource, "SOVRN_ENRICHED");
     assert.doesNotMatch(JSON.stringify(decision), /https?:|deeplink|secret|chat/i);
+    const fetchDiagnostic = logs.find(item => item.event === "homedepot_fetch_diagnostics");
+    assert.deepEqual(fetchDiagnostic, {
+      event: "homedepot_fetch_diagnostics", requestId: "homedepot-runtime",
+      httpStatus: 200, responseOk: true, normalizedContentType: "text/html",
+      responseByteLength: new TextEncoder().encode(fixture()).byteLength,
+      redirectCount: 1, finalHostIsHomeDepot: true, challengeIndicator: false,
+      responseClass: "SUCCESS_HTML"
+    });
   } finally { console.log = oldLog; }
 });
