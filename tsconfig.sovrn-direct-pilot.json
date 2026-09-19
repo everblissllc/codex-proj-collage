@@ -7,5 +7,5 @@
     "rootDir": ".",
     "types": ["@cloudflare/workers-types", "node"]
   },
-  "include": ["src/**/*.ts", "pilot/sovrn-direct-runner.ts", "pilot/sovrn-walmart-runner.ts"]
+  "include": ["src/**/*.ts", "pilot/sovrn-direct-runner.ts", "pilot/sovrn-walmart-runner.ts", "pilot/sovrn-homedepot-runner.ts"]
 }

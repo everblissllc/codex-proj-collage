@@ -33,6 +33,11 @@ export const sovrnMerchantAdapters: Readonly<Record<SovrnStoreId, SovrnMerchantA
     productIdentity: url => pathMatch(url, /\/A-(\d+)(?:\/|$)/i),
     productSignificantParams: ["preselect", "preselectchild"]
   },
+  homedepot: {
+    store: "homedepot", domains: ["homedepot.com"], merchantNames: ["the home depot", "home depot", "homedepot.com"],
+    productIdentity: url => pathMatch(url, /\/p\/(?:[^/]+\/)?(\d+)(?:\/)?$/i),
+    productSignificantParams: []
+  },
   nordstrom: {
     store: "nordstrom", domains: ["nordstrom.com"], merchantNames: ["nordstrom", "nordstrom.com"],
     productIdentity: url => pathMatch(url, /\/s\/(?:[^/]+\/)?(\d+)(?:\/|$)/i),

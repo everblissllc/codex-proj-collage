@@ -1,6 +1,6 @@
 import type { Price, ProductData } from "../../types";
 
-export type SovrnStoreId = "walmart" | "elf" | "target" | "nordstrom" | "ulta" | "sephora" | "ecosmetics" | "bubble";
+export type SovrnStoreId = "walmart" | "elf" | "target" | "homedepot" | "nordstrom" | "ulta" | "sephora" | "ecosmetics" | "bubble";
 export type SovrnMarket = "usd_en";
 export type SovrnReferenceSemantics = "was" | "list";
 export type SovrnStockState = "in_stock" | "out_of_stock" | "unknown";
