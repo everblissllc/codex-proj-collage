@@ -12,6 +12,17 @@ export type AmazonProductMetadata = {
   isBuyBoxWinner?: boolean;
   merchant?: { id?: string; name?: string };
 };
+export type HomeDepotProductMetadata = {
+  productId: string;
+  model: string;
+  brand?: string;
+  productFamily?: string;
+  color?: string;
+  dimensions?: { width: number; height: number; depth: number; unit: "in" };
+  construction?: { gauge?: number; material?: string };
+  mounting?: string;
+  packCount?: number;
+};
 export type ProductData = {
   store: StoreId;
   inputUrl: string;
@@ -23,6 +34,7 @@ export type ProductData = {
   currentPrice: Price;
   oldPrice?: Price;
   amazon?: AmazonProductMetadata;
+  homeDepot?: HomeDepotProductMetadata;
 };
 export type GeneratedContent = { shortTitle: string; facebookPost: string; facebookComment: string };
 export type CopyDraft = { shortTitle: string; facebookHookTemplate?: string };

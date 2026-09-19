@@ -1,6 +1,7 @@
 import type { ProductData } from "../../types";
+import type { HomeDepotProductEvidence } from "../homedepot/extractor";
 
-export type SovrnStoreId = "walmart";
+export type SovrnStoreId = "walmart" | "homedepot";
 export type SovrnMarket = "usd_en";
 export type SovrnVariantClassification =
   | "EXACT_VARIANT_MATCH"
@@ -30,6 +31,7 @@ export type SovrnSourceEvidence = {
   productIdConfirmed: boolean;
   productNames: string[];
   variant: SovrnVariantEvidence;
+  homeDepot?: HomeDepotProductEvidence;
 };
 
 export type SovrnWireOffer = {

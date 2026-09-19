@@ -20,6 +20,8 @@ import { resolveAmazonIdentity } from "../stores/amazon/identity";
 import type { AmazonProductProvider } from "../stores/amazon/creators-api-product";
 import type { SovrnProductProvider } from "../stores/sovrn/types";
 import { enrichWalmartWithSovrn } from "../stores/sovrn/walmart-integration";
+import { extractHomeDepotProduct, homeDepotProductId } from "../stores/homedepot/extractor";
+import { enrichHomeDepotWithSovrn } from "../stores/homedepot/sovrn-integration";
 
 export type ProcessDeps = { fetcher: FetchLike; copyProvider: CopyProvider; renderer: ScreenshotRenderer; pageRenderer?: MobilePageScreenshotRenderer; amazonProductProvider?: AmazonProductProvider; sovrnProductProvider?: SovrnProductProvider; disclosure: string; requestId: string; telegramUserId?: number; dnsCheck?: DnsCheck; cardCache?: CardCache };
 export type ProcessResult = { product: ProductData; content: GeneratedContent; card: CardImage };
@@ -121,7 +123,7 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
       console.log(JSON.stringify({ event: "process_complete", ...base, store, hostname, extractionDurationMs, aiDurationMs, renderDurationMs, cacheStatus: "disabled", totalDurationMs: Date.now() - started, success: true }));
       return { product, content: result.content, card: result.card };
     }
-    if (store !== "walmart" && store !== "amazon") {
+    if (store !== "walmart" && store !== "amazon" && store !== "homedepot") {
       await page.response.body?.cancel();
       throw new ProductError("UNSUPPORTED_STORE", "store", `Unsupported store: ${store ?? "unknown"}`);
     }
@@ -148,6 +150,19 @@ export async function processProductLink(inputUrl: string, deps: ProcessDeps): P
       console.log(JSON.stringify({ ...base, ...sovrnDecision.telemetry }));
       product = sovrnDecision.product;
       canonicalProductId = [diagnostics.canonicalProductId, walmartProductId(product.canonicalProductUrl ?? product.resolvedUrl)].find(usableWalmartProductId);
+    } else if (store === "homedepot") {
+      const { text: html } = await readLimitedTextWithSize(page.response);
+      const sourceProduct = extractHomeDepotProduct(html, inputUrl, page.resolvedUrl);
+      const sovrnDecision = await enrichHomeDepotWithSovrn({
+        sourceProduct,
+        sourceHtml: html,
+        requestId: deps.requestId,
+        provider: deps.sovrnProductProvider,
+        validateImage: async url => { await fetchImageAsDataUrl(url, deps.fetcher, deps.dnsCheck ?? assertPublicDns, deps.requestId); }
+      });
+      console.log(JSON.stringify({ ...base, ...sovrnDecision.telemetry }));
+      product = sovrnDecision.product;
+      canonicalProductId = homeDepotProductId(sourceProduct.canonicalProductUrl ?? sourceProduct.resolvedUrl);
     } else {
       let identityHtml: string | undefined;
       if (!amazonAsinFromUrl(page.resolvedUrl)) {

@@ -65,8 +65,9 @@ const integrate = (source, result, overrides = {}) => enrichWalmartWithSovrn({
   ...overrides
 });
 
-test("Walmart is the only registered production Sovrn retailer", () => {
+test("Walmart production and Home Depot feasibility adapters are registered while other retailers remain disabled", () => {
   assert.equal(sovrnStoreForHostname("www.walmart.com"), "walmart");
+  assert.equal(sovrnStoreForHostname("www.homedepot.com"), "homedepot");
   for (const hostname of ["amazon.com", "elfcosmetics.com", "target.com", "ulta.com", "sephora.com"]) assert.equal(sovrnStoreForHostname(hostname), undefined);
 });
 
@@ -422,10 +423,12 @@ test("shared Facebook and Telegram copy behavior remains unchanged for normalize
   assert.equal((comment.match(/#Ad/g) ?? []).length, 1);
 });
 
-test("Amazon production orchestration keeps its Creators provider and Sovrn is scoped to Walmart", () => {
+test("Amazon keeps its Creators provider while Sovrn runtime is scoped to Walmart and Home Depot", () => {
   const orchestration = readFileSync(path.join(process.cwd(), "src/orchestration/process-product-link.ts"), "utf8");
   assert.match(orchestration, /amazonProductProvider/);
   assert.match(orchestration, /if \(store === "walmart"\)[\s\S]*enrichWalmartWithSovrn/);
+  assert.match(orchestration, /store === "homedepot"[\s\S]*enrichHomeDepotWithSovrn/);
+  assert.doesNotMatch(orchestration, /store === "amazon"[\s\S]{0,300}enrich(?:Walmart|HomeDepot)WithSovrn/);
 });
 
 test("Sovrn client uses official Price Comparison contract without leaking credentials", async () => {

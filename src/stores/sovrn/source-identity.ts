@@ -1,4 +1,6 @@
 import { ProductError } from "../../types";
+import { inspectHomeDepotProduct } from "../homedepot/extractor";
+import { assessHomeDepotSovrnIdentity } from "../homedepot/sovrn-identity";
 import { hostnameMatches, sovrnMerchantAdapters } from "./merchant-registry";
 import type { ProductData } from "../../types";
 import type { SovrnIdentityAssessment, SovrnSourceEvidence, SovrnStoreId, SovrnVariantClassification, SovrnVariantEvidence, SovrnWireOffer } from "./types";
@@ -93,9 +95,15 @@ export function inspectSovrnSource(input: { store: SovrnStoreId; sourceProduct: 
     products.some(product => [product.productId, product.sku].some(value => value?.toLowerCase() === normalizedProductId)) ||
     input.html.toLowerCase().includes(normalizedProductId)
   ));
+  let homeDepot;
+  if (input.store === "homedepot") {
+    try { homeDepot = inspectHomeDepotProduct(input.html, input.resolvedUrl); }
+    catch { /* The provider will fail closed when deterministic source evidence is unavailable. */ }
+  }
   return {
     store: input.store, productId, productIdConfirmed, productNames: names,
-    variant: { explicit: Boolean(size || color || mpn), multiVariantFamily: false, size, color, sku, gtin: products.find(product => product.gtin)?.gtin, mpn }
+    variant: { explicit: Boolean(size || color || mpn), multiVariantFamily: false, size, color, sku, gtin: products.find(product => product.gtin)?.gtin, mpn },
+    homeDepot
   };
 }
 
@@ -131,6 +139,7 @@ function offerVariant(offer: SovrnWireOffer, source: SovrnSourceEvidence): Sovrn
 }
 
 export function assessSovrnIdentity(source: SovrnSourceEvidence, offer: SovrnWireOffer): SovrnIdentityAssessment {
+  if (source.store === "homedepot") return assessHomeDepotSovrnIdentity(source, offer);
   const offerName = offer.title ? normalizedName(offer.title) : "";
   const offerEvidence = offerVariant(offer, source);
   const variantClassification = classifySovrnVariant(source.variant, offerEvidence);

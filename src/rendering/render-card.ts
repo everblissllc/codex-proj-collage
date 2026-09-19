@@ -65,10 +65,10 @@ export async function renderAmazonCard(product: ProductData, content: GeneratedC
 }
 
 export async function renderCard(product: ProductData, content: GeneratedContent, renderer: ScreenshotRenderer, fetcher: FetchLike = workerFetch, dnsCheck: DnsCheck = assertPublicDns, requestId?: string): Promise<CardImage> {
-  if (product.store !== "walmart" && product.store !== "amazon") throw new ProductError("UNSUPPORTED_STORE", "store", `No template for ${product.store}`);
-  try { return product.store === "walmart"
-    ? await renderWalmartCard(product, content, renderer, fetcher, dnsCheck, requestId)
-    : await renderAmazonCard(product, content, renderer, fetcher, dnsCheck, requestId); }
+  if (product.store !== "walmart" && product.store !== "amazon" && product.store !== "homedepot") throw new ProductError("UNSUPPORTED_STORE", "store", `No template for ${product.store}`);
+  try { return product.store === "amazon"
+    ? await renderAmazonCard(product, content, renderer, fetcher, dnsCheck, requestId)
+    : await renderWalmartCard(product, content, renderer, fetcher, dnsCheck, requestId); }
   catch (error) {
     if (error instanceof ProductError && error.stage === "render") throw error;
     throw new ProductError("RENDER_FAILED", "render", String(error));

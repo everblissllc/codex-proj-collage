@@ -20,6 +20,10 @@ export const sovrnMerchantAdapters: Readonly<Record<SovrnStoreId, SovrnMerchantA
   walmart: {
     store: "walmart", domains: ["walmart.com"], merchantNames: ["walmart", "walmart.com"],
     productIdentity: url => pathMatch(url, /\/ip\/(?:[^/]+\/)?(\d+)(?:\/|$)/i), productSignificantParams: ["selectedsellerid"]
+  },
+  homedepot: {
+    store: "homedepot", domains: ["homedepot.com"], merchantNames: ["the home depot", "home depot", "homedepot.com"],
+    productIdentity: url => pathMatch(url, /\/p\/(?:[^/]+\/)?(\d+)(?:\/)?$/i), productSignificantParams: []
   }
 };
 

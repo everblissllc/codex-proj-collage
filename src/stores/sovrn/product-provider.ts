@@ -70,7 +70,9 @@ export class PriceComparisonSovrnProductProvider implements SovrnProductProvider
     const response = await this.client.compareByPlainlinkDetailed({ plainlink: lookup.plainlink, store: input.store, requestId: input.requestId });
     const offers = decodeSovrnOffers(response.value);
     if (!offers.length) throw new ProductError("SOVRN_NO_OFFER_FOR_PLAINLINK", "extraction", "Sovrn returned no offer for this product URL");
-    const sameRetailer = offers.filter(offer => merchantMatchesStore(input.store, offer.merchantName));
+    const sameRetailer = offers.filter(offer => input.store === "homedepot"
+      ? offer.merchantName.trim().toLowerCase() === "the home depot"
+      : merchantMatchesStore(input.store, offer.merchantName));
     if (!sameRetailer.length) throw new ProductError("SOVRN_NO_SAME_RETAILER_OFFER", "extraction", "Sovrn returned no source-retailer offer");
     if (!source.productIdConfirmed || !source.productNames.length) {
       throw new ProductError("SOVRN_SOURCE_IDENTITY_UNAVAILABLE", "extraction", "Current source product identity is unavailable");

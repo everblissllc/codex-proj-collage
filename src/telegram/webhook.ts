@@ -66,7 +66,7 @@ let sovrnRuntime: {
   provider: SovrnProductProvider;
 } | undefined;
 
-function walmartSovrnProductProvider(env: Env): SovrnProductProvider | undefined {
+function sovrnProductProvider(env: Env): SovrnProductProvider | undefined {
   if (!env.SOVRN_SECRET_KEY || !env.SOVRN_SITE_API_KEY || env.SOVRN_MARKET !== "usd_en") return undefined;
   if (sovrnRuntime && sovrnRuntime.secretKey === env.SOVRN_SECRET_KEY && sovrnRuntime.siteApiKey === env.SOVRN_SITE_API_KEY && sovrnRuntime.market === env.SOVRN_MARKET) {
     return sovrnRuntime.provider;
@@ -162,7 +162,7 @@ export async function processTelegramJob(job: TelegramJob, env: Env): Promise<vo
       renderer: new BrowserScreenshotRenderer(env.BROWSER),
       pageRenderer: new BrowserMobilePageRenderer(env.BROWSER),
       amazonProductProvider: amazonProductProvider(env),
-      sovrnProductProvider: walmartSovrnProductProvider(env),
+      sovrnProductProvider: sovrnProductProvider(env),
       disclosure: env.AFFILIATE_DISCLOSURE || "#Ad",
       requestId,
       telegramUserId,

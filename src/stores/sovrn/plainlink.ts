@@ -5,7 +5,7 @@ import type { SovrnStoreId } from "./types";
 
 const TRACKING_PARAMS = new Set([
   "affiliate", "afid", "affid", "aff_id", "affsource", "afsrc", "campaign", "campaignid", "clickid", "click_id",
-  "cjevent", "irclickid", "irgwc", "iradid", "irpid", "linkid", "partner", "partnerid", "ranmid", "ranear",
+  "cjevent", "cm_mmc", "irclickid", "irgwc", "iradid", "irpid", "linkid", "partner", "partnerid", "ranmid", "ranear",
   "raneaid", "ref", "ref_", "refid", "source", "subid", "tag", "utm_campaign", "utm_content", "utm_medium",
   "utm_source", "utm_term", "wickedid"
 ]);
