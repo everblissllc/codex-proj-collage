@@ -47,13 +47,24 @@ function canonicalUrl(html: string, base: URL): URL | undefined {
   return undefined;
 }
 function sizeFromValue(value?: string): string | undefined {
-  const match = value?.replace(/[_-]+/g, " ").match(/(\d+(?:\.\d+)?)\s*(fl\.?\s*oz\.?|oz\.?|ml)\b/i);
+  const match = value?.replace(/[_-]+/g, " ").match(/(\d+(?:\.\d+)?)\s*(fl\.?\s*oz\.?|oz\.?|ml|inch(?:es)?|in\.?)\b/i);
   return match ? `${match[1]} ${match[2].replace(/\./g, "").replace(/\s+/g, " ")}` : undefined;
 }
 const normalizedVariant = (value: string): string => value.trim().toLowerCase().replace(/fluid ounces?|fl\.?\s*oz\.?/g, "floz")
-  .replace(/ounces?|oz\.?/g, "oz").replace(/millilit(?:er|re)s?|ml/g, "ml").replace(/[^a-z0-9.]+/g, "");
+  .replace(/ounces?|oz\.?/g, "oz").replace(/millilit(?:er|re)s?|ml/g, "ml").replace(/inch(?:es)?|in\.?/g, "in").replace(/[^a-z0-9.]+/g, "");
 const normalizedName = (value: string): string => decodeHtml(value).toLowerCase().replace(/\b(?:at\s+)?(?:walmart|walmart\.com)\b/g, " ")
   .replace(/[^a-z0-9]+/g, " ").trim();
+
+const titleStopwords = new Set(["a", "an", "and", "for", "of", "the", "with"]);
+function reorderedTitleMatch(left: string, right: string): boolean {
+  const tokens = (value: string): string[] => [...new Set(normalizedName(value).split(" ").filter(token => token && !titleStopwords.has(token)))];
+  const leftTokens = tokens(left);
+  const rightTokens = tokens(right);
+  if (leftTokens.length < 5 || rightTokens.length < 5 || leftTokens[0] !== rightTokens[0]) return false;
+  const rightSet = new Set(rightTokens);
+  const shared = leftTokens.filter(token => rightSet.has(token)).length;
+  return shared >= 5 && shared / Math.min(leftTokens.length, rightTokens.length) >= 0.8;
+}
 
 export function inspectSovrnSource(input: { store: SovrnStoreId; sourceProduct: ProductData; postUrl: string; resolvedUrl: string; html: string }): SovrnSourceEvidence {
   const resolved = new URL(input.resolvedUrl);
@@ -121,14 +132,19 @@ function offerVariant(offer: SovrnWireOffer, source: SovrnSourceEvidence): Sovrn
 
 export function assessSovrnIdentity(source: SovrnSourceEvidence, offer: SovrnWireOffer): SovrnIdentityAssessment {
   const offerName = offer.title ? normalizedName(offer.title) : "";
+  const offerEvidence = offerVariant(offer, source);
+  const variantClassification = classifySovrnVariant(source.variant, offerEvidence);
   const nameMatch = source.productNames.some(name => {
     const normalized = normalizedName(name);
-    return normalized.length >= 8 && (offerName.includes(normalized) || normalized.includes(offerName));
+    if (normalized.length < 8) return false;
+    if (offerName.includes(normalized) || normalized.includes(offerName)) return true;
+    // Reordering alone is supporting evidence only after independently extracted
+    // variant fields match. No synonyms or semantic/fuzzy title inference is used.
+    return variantClassification === "EXACT_VARIANT_MATCH" && reorderedTitleMatch(name, offer.title ?? "");
   });
-  const offerEvidence = offerVariant(offer, source);
   return {
     productMatchConfirmed: source.productIdConfirmed && nameMatch,
-    variantClassification: classifySovrnVariant(source.variant, offerEvidence),
+    variantClassification,
     sourceVariant: source.variant,
     offerVariant: offerEvidence
   };

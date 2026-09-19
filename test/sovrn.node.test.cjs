@@ -115,6 +115,99 @@ test("explicit Walmart color and model conflicts are rejected", async () => {
   await rejectCode(providerFor([offer({ mpn: "PB051" })]).provider.product(input()), "SOVRN_VARIANT_CONFLICT");
 });
 
+test("Expert Grill reordered title words are accepted only with exact structured 24-inch Black evidence", async () => {
+  const expertUrl = "https://www.walmart.com/ip/Expert-Grill-Heavy-Duty-24-inch-Charcoal-Grill-Black/746021606";
+  const expertTitle = "Expert Grill Heavy Duty Charcoal Grill 24 Inch Black Steel";
+  const expertHtml = `<link rel="canonical" href="${expertUrl}"><script type="application/ld+json">${JSON.stringify({
+    "@type": "Product", name: expertTitle, model: "XG1910200103", size: "24 Inch", color: "Black"
+  })}</script>`;
+  const expertSource = sourceProduct({
+    inputUrl: expertUrl, postUrl: expertUrl, resolvedUrl: expertUrl, canonicalProductUrl: expertUrl,
+    rawTitle: expertTitle,
+    currentPrice: { value: 98, currency: "USD", formatted: "$98.00" },
+    oldPrice: { value: 124, currency: "USD", formatted: "$124.00" }
+  });
+  const expertOffer = offer({
+    name: "Expert Grill Charcoal Grill, 24 Inch Heavy Duty Charcoal Grill with Wheels, Black",
+    salePrice: 124, retailPrice: 0, mpn: undefined
+  });
+  const fixture = providerFor([expertOffer]);
+  const candidate = await fixture.provider.product(input({
+    sourceProduct: expertSource, postUrl: expertUrl, resolvedUrl: expertUrl, sourceHtml: expertHtml
+  }));
+  assert.equal(candidate.identity.productMatchConfirmed, true);
+  assert.equal(candidate.identity.variantClassification, "EXACT_VARIANT_MATCH");
+  assert.equal(candidate.identity.sourceVariant.size, "24 Inch");
+  assert.equal(candidate.identity.offerVariant.size, "24 Inch");
+
+  const result = await enrichWalmartWithSovrn({
+    sourceProduct: expertSource,
+    sourceHtml: expertHtml,
+    provider: integrationProvider(candidate),
+    validateImage: async () => {}
+  });
+  assert.equal(result.telemetry.sovrnStatus, "PRICE_MISMATCH");
+  assert.equal(result.telemetry.priceParity, "DIFFERENT");
+  assert.equal(result.telemetry.walmartCurrentCents, 9800);
+  assert.equal(result.telemetry.sovrnCurrentCents, 12400);
+  assert.equal(result.telemetry.deltaCents, 2600);
+  assert.equal(result.telemetry.finalSource, "WALMART_FALLBACK");
+  assert.equal(result.product, expertSource);
+});
+
+test("Expert Grill structured model, size, and color conflicts remain rejected", async () => {
+  const expertUrl = "https://www.walmart.com/ip/Expert-Grill/746021606";
+  const expertTitle = "Expert Grill Heavy Duty Charcoal Grill 24 Inch Black Steel";
+  const expertSource = sourceProduct({ resolvedUrl: expertUrl, canonicalProductUrl: expertUrl, rawTitle: expertTitle });
+  const baseHtml = { "@type": "Product", name: expertTitle, model: "XG1910200103", size: "24 Inch", color: "Black" };
+  const call = (htmlPatch, offerPatch) => providerFor([offer({
+    name: "Expert Grill Charcoal Grill, 24 Inch Heavy Duty Charcoal Grill with Wheels, Black",
+    salePrice: 124, retailPrice: 0, ...offerPatch
+  })]).provider.product(input({
+    sourceProduct: expertSource, postUrl: expertUrl, resolvedUrl: expertUrl,
+    sourceHtml: `<link rel="canonical" href="${expertUrl}"><script type="application/ld+json">${JSON.stringify({ ...baseHtml, ...htmlPatch })}</script>`
+  }));
+  await rejectCode(call({}, { mpn: "XG-DIFFERENT" }), "SOVRN_VARIANT_CONFLICT");
+  await rejectCode(call({}, { name: "Expert Grill Charcoal Grill, 32 Inch Heavy Duty Charcoal Grill with Wheels, Black" }), "SOVRN_VARIANT_CONFLICT");
+  await rejectCode(call({}, { name: "Expert Grill Charcoal Grill, 24 Inch Heavy Duty Charcoal Grill with Wheels, White" }), "SOVRN_VARIANT_CONFLICT");
+});
+
+test("PB045, Ozark, and BlendBOSS identity acceptance remains unchanged", async () => {
+  const cases = [
+    {
+      url: resolvedUrl, sourceTitle: title, model: "PB045", color: "Black",
+      offerTitle: title, salePrice: 79.99, retailPrice: 89
+    },
+    {
+      url: "https://www.walmart.com/ip/Ozark-Trail-Grill/19658170815",
+      sourceTitle: "Ozark Trail Disposable Instant Charcoal Grill, 1 lb. Charcoal Content",
+      model: "32500LIS", size: "1 lb",
+      offerTitle: "Ozark Trail Disposable Instant Charcoal Grill 1 lb. Charcoal Content",
+      salePrice: 9.88, retailPrice: 9.88
+    },
+    {
+      url: "https://www.walmart.com/ip/Ninja-BlendBOSS/18317156543",
+      sourceTitle: "Ninja BlendBOSS 26-Oz Personal Blender for Smoothies & Frozen Drinks Travel Tumbler Auto-iQ 1200PW DB351CY Cyberspace",
+      model: "DB351CY", size: "26 oz", color: "Cyberspace",
+      offerTitle: "Ninja BlendBOSS 26-Oz Personal Blender for Smoothies & Frozen Drinks Travel Tumbler Auto-iQ Technology 1200PW DB351CY Cyberspace",
+      salePrice: 129.97, retailPrice: 129.99
+    }
+  ];
+  for (const item of cases) {
+    const source = sourceProduct({
+      inputUrl: item.url, postUrl: item.url, resolvedUrl: item.url, canonicalProductUrl: item.url,
+      rawTitle: item.sourceTitle
+    });
+    const html = `<link rel="canonical" href="${item.url}"><script type="application/ld+json">${JSON.stringify({
+      "@type": "Product", name: item.sourceTitle, model: item.model, size: item.size, color: item.color
+    })}</script>`;
+    const result = await providerFor([offer({ name: item.offerTitle, salePrice: item.salePrice, retailPrice: item.retailPrice })])
+      .provider.product(input({ sourceProduct: source, postUrl: item.url, resolvedUrl: item.url, sourceHtml: html }));
+    assert.equal(result.identity.productMatchConfirmed, true);
+    assert.ok(["EXACT_VARIANT_MATCH", "NO_VARIANT_CONFLICT"].includes(result.identity.variantClassification));
+  }
+});
+
 test("high-risk family ambiguity remains rejected", () => {
   assert.equal(classifySovrnVariant({ explicit: false, multiVariantFamily: true }, { explicit: true, size: "8 oz" }), "VARIANT_AMBIGUOUS_HIGH_RISK");
 });

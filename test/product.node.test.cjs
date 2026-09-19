@@ -221,6 +221,70 @@ test("Walmart selected variant price is unaffected by lower or higher sibling pr
   }
 });
 
+function walmartExpertGrillFixture(overrides = {}) {
+  const selectedId = "1R8IP3M6O5TJ";
+  const siblingId = "EXPERT32INCH";
+  const selected = {
+    id: selectedId,
+    usItemId: "746021606",
+    variants: ["cooking_surface_width-24in"],
+    name: "Expert Grill Heavy Duty Charcoal Grill 24 Inch Black Steel",
+    model: "XG1910200103",
+    imageInfo: { thumbnailUrl: "https://i5.walmartimages.com/expert-24-black.jpeg" },
+    priceInfo: {
+      currentPrice: { price: 98, priceString: "$98.00", currencyUnit: "USD" },
+      wasPrice: { price: 124, priceString: "$124.00", currencyUnit: "USD" }
+    },
+    ...(overrides.selected ?? {})
+  };
+  const sibling = {
+    id: siblingId,
+    usItemId: "17950388518",
+    variants: ["cooking_surface_width-32in"],
+    name: "Expert Grill Heavy Duty Charcoal Grill 32 Inch Black Steel",
+    imageInfo: { thumbnailUrl: "https://i5.walmartimages.com/expert-32-black.jpeg" },
+    priceInfo: { currentPrice: { price: 174, currencyUnit: "USD" } },
+    ...(overrides.sibling ?? {})
+  };
+  const product = {
+    usItemId: "746021606",
+    id: selectedId,
+    displayVariantProductId: selectedId,
+    selectedVariantIds: ["cooking_surface_width-24in"],
+    variantProductIdMap: {
+      "cooking_surface_width-24in": selectedId,
+      "cooking_surface_width-32in": siblingId
+    },
+    variantsMap: { [siblingId]: sibling, [selectedId]: selected },
+    canonicalUrl: "/ip/Expert-Grill-Heavy-Duty-24-inch-Charcoal-Grill-Black/746021606",
+    name: selected.name,
+    model: "XG1910200103",
+    imageInfo: selected.imageInfo,
+    priceInfo: selected.priceInfo,
+    ...(overrides.product ?? {})
+  };
+  return `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { initialData: { data: { product } } } } })}</script>`;
+}
+
+const expertGrillUrl = "https://www.walmart.com/ip/Expert-Grill-Heavy-Duty-24-inch-Charcoal-Grill-Black/746021606";
+
+test("Walmart Expert Grill full attribute map selects the 24-inch item and excludes the 32-inch sibling", () => {
+  const p = extractWalmartProduct(walmartExpertGrillFixture(), input, expertGrillUrl);
+  assert.equal(p.rawTitle, "Expert Grill Heavy Duty Charcoal Grill 24 Inch Black Steel");
+  assert.equal(p.currentPrice.value, 98);
+  assert.equal(p.oldPrice.value, 124);
+  assert.equal(p.imageUrl, "https://i5.walmartimages.com/expert-24-black.jpeg");
+  assert.notEqual(p.currentPrice.value, 174);
+  assert.notEqual(p.imageUrl, "https://i5.walmartimages.com/expert-32-black.jpeg");
+});
+
+test("Walmart Expert Grill selected item, internal mapping, and URL identity must agree", () => {
+  assert.throws(() => extractWalmartProduct(walmartExpertGrillFixture({ selected: { usItemId: "17950388518" } }), input, expertGrillUrl), { code: "WALMART_VARIANT_MISMATCH" });
+  assert.throws(() => extractWalmartProduct(walmartExpertGrillFixture({ product: {
+    variantProductIdMap: { "cooking_surface_width-24in": "EXPERT32INCH" }
+  } }), input, expertGrillUrl), { code: "WALMART_VARIANT_MISMATCH" });
+});
+
 test("Walmart selected variant accepts wasPrice, then listPrice, only when higher", () => {
   assert.equal(extractWalmartProduct(walmartVariantFixture(), input, ninjaUrl).oldPrice.value, 89);
   const listOnly = walmartVariantFixture({ selected: { priceInfo: {
