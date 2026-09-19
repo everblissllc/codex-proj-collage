@@ -41,7 +41,7 @@ jobs:
               "card_cache_stored", "process_complete", "process_failed",
               "job_processing_failed", "telegram_photo_sent", "telegram_copy_sent",
               "telegram_photo_prepared", "telegram_delivery_failed", "telegram_error_message_failed",
-              "amazon_source_identity", "walmart_sovrn_decision"
+              "amazon_source_identity", "walmart_sovrn_decision", "homedepot_sovrn_decision"
             ]);
             const fields = [
               "requestId", "store", "hostname", "cacheStatus", "reason", "errorCode",
@@ -129,6 +129,21 @@ jobs:
                 if (["EXACT", "DIFFERENT", "WALMART_ONLY", "SOVRN_ONLY", "NEITHER"].includes(entry.referenceParity)) safe.referenceParity = entry.referenceParity;
                 if (typeof entry.sovrnImageValid === "boolean") safe.sovrnImageValid = entry.sovrnImageValid;
                 if (["SOVRN_ENRICHED", "WALMART_FALLBACK"].includes(entry.finalSource)) safe.finalSource = entry.finalSource;
+                process.stdout.write(JSON.stringify(safe) + "\n");
+                return true;
+              }
+              if (entry.event === "homedepot_sovrn_decision") {
+                const safe = { event: entry.event };
+                if (["ACCEPTED", "NO_OFFER", "NO_SAME_RETAILER", "IDENTITY_REJECTED", "PRICE_MISMATCH", "INVALID_PRICE", "INVALID_IMAGE", "TIMEOUT", "PROVIDER_ERROR", "NOT_CONFIGURED"].includes(entry.sovrnStatus)) safe.sovrnStatus = entry.sovrnStatus;
+                if (["EXACT_VARIANT_MATCH", "NO_VARIANT_CONFLICT", "VARIANT_CONFLICT", "VARIANT_AMBIGUOUS_HIGH_RISK"].includes(entry.identityClassification)) safe.identityClassification = entry.identityClassification;
+                if (["EXACT", "DIFFERENT", "UNAVAILABLE"].includes(entry.priceParity)) safe.priceParity = entry.priceParity;
+                for (const field of ["sourceCurrentCents", "sovrnCurrentCents"]) {
+                  if (Number.isSafeInteger(entry[field]) && entry[field] > 0) safe[field] = entry[field];
+                }
+                if (Number.isSafeInteger(entry.deltaCents)) safe.deltaCents = entry.deltaCents;
+                if (["EXACT", "DIFFERENT", "HOME_DEPOT_ONLY", "SOVRN_ONLY", "NEITHER"].includes(entry.referenceParity)) safe.referenceParity = entry.referenceParity;
+                if (typeof entry.sovrnImageValid === "boolean") safe.sovrnImageValid = entry.sovrnImageValid;
+                if (["SOVRN_ENRICHED", "HOME_DEPOT_FALLBACK"].includes(entry.finalSource)) safe.finalSource = entry.finalSource;
                 process.stdout.write(JSON.stringify(safe) + "\n");
                 return true;
               }
