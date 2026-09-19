@@ -30,7 +30,7 @@ const map = (offers, overrides = {}) => mapSovrnProduct({
 const expectCode = (fn, code) => assert.throws(fn, error => error instanceof ProductError && error.code === code);
 test("hosted feasibility workflow runs Node directly without Cloudflare Worker operations", () => {
   const workflow = readFileSync(path.join(process.cwd(), ".github/workflows/sovrn-feasibility-pilot.yml"), "utf8");
-  assert.match(workflow, /sovrn-walmart-runner\.js/);
+  assert.match(workflow, /sovrn-homedepot-runner\.js/);
   assert.doesNotMatch(workflow, /wrangler|workers\.dev|secret bulk|workers\/scripts|CLOUDFLARE_|curl|--request/i);
 });
 
