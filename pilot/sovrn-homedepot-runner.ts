@@ -120,25 +120,34 @@ async function main(): Promise<void> {
   });
   const assessed = sameRetailer.map(offer => ({ offer, identity: identity(offer) }));
   const usable = assessed.filter(item => ["EXACT_VARIANT_MATCH", "NO_VARIANT_CONFLICT"].includes(item.identity.classification));
-  const selected = usable.length === 1 ? usable[0] : undefined;
-  const saleCents = cents(selected?.offer.salePrice);
-  const retailCents = cents(selected?.offer.retailPrice);
-  const image = await imageResult(selected?.offer.image, selected?.identity.classification ?? "SOURCE_IDENTITY_UNAVAILABLE");
+  // Observe the sole exact-merchant candidate before applying the unchanged
+  // identity acceptance gate. These fields are diagnostic only and cannot make
+  // an ambiguous candidate usable.
+  const observed = assessed.length === 1 ? assessed[0] : undefined;
+  const saleCents = cents(observed?.offer.salePrice);
+  const retailCents = cents(observed?.offer.retailPrice);
+  const imageUrl = text(observed?.offer.image);
+  const imageUrlSyntacticallyValid = (() => {
+    if (!imageUrl) return false;
+    try { return new URL(imageUrl).protocol === "https:"; } catch { return false; }
+  })();
+  const image = await imageResult(observed?.offer.image, observed?.identity.classification ?? "SOURCE_IDENTITY_UNAVAILABLE");
   console.log(JSON.stringify({
     event: "sovrn_homedepot_feasibility_result", success: true, market: "usd_en", httpStatus: response.httpStatus,
     totalOfferCount: offers.length, homeDepotOfferCount: sameRetailer.length,
     canonicalMerchantMatched: sameRetailer.some(offer => text(offer.merchant?.name)?.trim().toLowerCase() === "the home depot"),
     selectedOfferCount: usable.length,
-    merchantName: selected ? text(selected.offer.merchant?.name) : undefined,
-    merchantId: selected?.offer.merchant?.id,
-    title: selected ? text(selected.offer.name) : undefined,
-    model: selected?.identity.model,
-    affiliatable: selected?.offer.affiliatable,
-    currency: selected ? text(selected.offer.currency) : undefined,
-    salePrice: selected ? finite(selected.offer.salePrice) : undefined,
-    retailPrice: selected ? finite(selected.offer.retailPrice) : undefined,
-    identityClassification: selected?.identity.classification ?? assessed[0]?.identity.classification ?? "SOURCE_IDENTITY_UNAVAILABLE",
-    identityEvidence: selected?.identity.evidence ?? assessed[0]?.identity.evidence ?? {},
+    observedCandidateCount: observed ? 1 : 0,
+    merchantName: observed ? text(observed.offer.merchant?.name) : undefined,
+    merchantId: observed?.offer.merchant?.id,
+    model: observed?.identity.model,
+    affiliatable: observed?.offer.affiliatable,
+    currency: observed ? text(observed.offer.currency) : undefined,
+    salePrice: observed ? finite(observed.offer.salePrice) : undefined,
+    retailPrice: observed ? finite(observed.offer.retailPrice) : undefined,
+    imageUrlSyntacticallyValid,
+    identityClassification: observed?.identity.classification ?? "SOURCE_IDENTITY_UNAVAILABLE",
+    identityEvidence: observed?.identity.evidence ?? {},
     homeDepotCurrentCents: SOURCE_CURRENT_CENTS, sovrnCurrentCents: saleCents,
     deltaCents: saleCents === undefined ? undefined : saleCents - SOURCE_CURRENT_CENTS,
     priceParity: saleCents === undefined ? "UNAVAILABLE" : saleCents === SOURCE_CURRENT_CENTS ? "EXACT" : "DIFFERENT",
